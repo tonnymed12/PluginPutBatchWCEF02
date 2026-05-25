@@ -1,7 +1,7 @@
 sap.ui.define([
     'jquery.sap.global',
-	"sap/dm/dme/podfoundation/controller/PluginViewController",
-	"sap/ui/model/json/JSONModel",
+    "sap/dm/dme/podfoundation/controller/PluginViewController",
+    "sap/ui/model/json/JSONModel",
     "./Utils/Commons",
     "./Utils/ApiPaths",
     "../model/formatter",
@@ -10,13 +10,15 @@ sap.ui.define([
     "sap/m/Dialog",
     "sap/m/Input",
     "sap/m/Button",
-    "sap/ui/core/library"
-], function (jQuery, PluginViewController, JSONModel, Commons, ApiPaths, formatter, Element, MessageBox, Dialog, Input, Button, coreLibrary) {
-	"use strict";
+    "sap/ui/core/library",
+    "sap/ui/core/Fragment"
+], function (jQuery, PluginViewController, JSONModel, Commons, ApiPaths, formatter, Element, MessageBox, Dialog, Input, Button, CoreLibrary, Fragment) {
+    "use strict";
+
     var gOperationPhase = {};
     const OPERATION_STATUS = { ACTIVE: "ACTIVE", QUEUED: "IN_QUEUE" }
 
-	return PluginViewController.extend("serviacero.custom.plugins.zpluginPutBatchWCEF02.zpluginPutBatchWCEF02.controller.MainView", {
+    return PluginViewController.extend("serviacero.custom.plugins.zpluginPutBatchWCPintado.zpluginPutBatchWCPintado.controller.MainView", {
         Commons: Commons,
         ApiPaths: ApiPaths,
         formatter: formatter,
@@ -25,6 +27,26 @@ sap.ui.define([
             PluginViewController.prototype.onInit.apply(this, arguments);
             this.oScanInput = this.byId("scanInput");
             this._suggestedQtyCintas = 0;
+            this.iSecuenciaCounter = 0;
+
+            // Modelo "orderSummary" para resumen de materiales de la BOM
+            var oOrderSummaryModel = new JSONModel({
+                material: "",
+                material2: "",
+                descripcion: "",
+                descripcion2: "",
+                cantidadNecesaria: 0,
+                cantidadNecesaria2: 0,
+                cantidadConsumida: 0,
+                cantidadConsumida2: 0,
+                cantidadEscaneada: 0,
+                cantidadEscaneada2: 0,
+                unidadMedida: "",
+                unidadMedida2: "",
+                labelCintas: "CINTAS",
+                labelAlambre: "ALAMBRE"
+            });
+            this.getView().setModel(oOrderSummaryModel, "orderSummary");
         },
 
         /**
@@ -62,21 +84,139 @@ sap.ui.define([
         },
 
         /**
-         * Stub para agregar cantidad asignada por fila (feature pendiente)
+         * Confirma la cantidad asignada para un slot de la tabla activa y persiste al backend.
          */
         onAddQty: function (oEvent) {
-            // Feature de cantidad asignada - pendiente de implementación
+            var oView = this.getView();
+            var oBundle = oView.getModel("i18n").getResourceBundle();
+            var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
+            var self = this;
+
+            var oButton = oEvent.getSource();
+            var oItem = oButton.getParent();       // ColumnListItem
+            var oTable = oItem.getParent();        // Table
+            var oModel = oTable ? oTable.getModel() : null;
+            if (!oModel) { return; }
+
+            var iCurrentIndex = oTable.indexOfItem(oItem);
+            if (iCurrentIndex === -1) { return; }
+
+            var aCurrentItems = (oModel && oModel.getProperty("/ITEMS")) || [];
+            var oSlot = aCurrentItems[iCurrentIndex];
+            if (!oSlot || !oSlot.value) {
+                sap.m.MessageToast.show(oBundle.getText("sinLotes"));
+                return;
+            }
+
+            // Fallback a loteQty si cantidadAsignada está vacía o inválida
+            var nNewCantidad = parseFloat(oSlot.cantidadAsignada);
+            if (isNaN(nNewCantidad) || oSlot.cantidadAsignada === "" || oSlot.cantidadAsignada === undefined) {
+                nNewCantidad = parseFloat(oSlot.loteQty);
+            }
+            var nMaxCantidad = parseFloat(oSlot.loteQty);
+
+            if (isNaN(nNewCantidad) || nNewCantidad <= 0) {
+                sap.m.MessageToast.show(oBundle.getText("cantidadInvalida"));
+                return;
+            }
+            if (!isNaN(nMaxCantidad) && nMaxCantidad > 0 && nNewCantidad > nMaxCantidad) {
+                sap.m.MessageToast.show(oBundle.getText("cantidadExcedeLote", [nMaxCantidad]));
+                return;
+            }
+
+            // Capturar referencia MAT!LOTE para localizar el slot tras el refresh
+            var sMaterialLoteRef = (oSlot.value || "").trim().toUpperCase().split("!").slice(0, 2).join("!");
+
+            oView.byId("idPluginPanel").setBusy(true);
+            this._refreshSlotsFromBackend().then(function (oRefresh) {
+                oView.byId("idPluginPanel").setBusy(false);
+                if (!oRefresh) {
+                    sap.m.MessageToast.show(oBundle.getText("errorRefrescarSlots"));
+                    return;
+                }
+
+                var aAllSlots = oRefresh.allSlots;
+
+                // Localizar slot por MAT!LOTE en el pool global
+                var iIndex = -1;
+                for (var k = 0; k < aAllSlots.length; k++) {
+                    if (!aAllSlots[k].value) { continue; }
+                    if (aAllSlots[k].value.toUpperCase().split("!").slice(0, 2).join("!") === sMaterialLoteRef) {
+                        iIndex = k;
+                        break;
+                    }
+                }
+                if (iIndex === -1) {
+                    sap.m.MessageToast.show(oBundle.getText("sinLotes"));
+                    return;
+                }
+
+                // Rebuild value: MAT!LOTE!NUEVA_CANTIDAD!NO_CARGA!CANTIDAD_PENDIENTE
+                var sCantidadFormatted = nNewCantidad.toFixed(2);
+                var currentParts = aAllSlots[iIndex].value.split("!");
+                var sNoCargaAdd = currentParts.length >= 4 ? currentParts[3] : (currentParts[2] || "");
+                aAllSlots[iIndex].cantidadAsignada = sCantidadFormatted;
+                aAllSlots[iIndex].value = currentParts[0] + "!" + currentParts[1] + "!" + sCantidadFormatted + "!" + sNoCargaAdd + "!" + sCantidadFormatted;
+
+                // Re-repartir slots entre ambas tablas
+                var aSlotsCin = aAllSlots.slice(0, oRefresh.iQtyCin);
+                var aSlotsAlm = aAllSlots.slice(oRefresh.iQtyCin, oRefresh.iQtyCin + oRefresh.iQtyAlm);
+                var oTableCin = oView.byId("idSlotTableCintas");
+                var oTableAlm = oView.byId("idSlotTableAlambre");
+                if (oTableCin) { oTableCin.setModel(new sap.ui.model.json.JSONModel({ ITEMS: aSlotsCin })); }
+                if (oTableAlm) { oTableAlm.setModel(new sap.ui.model.json.JSONModel({ ITEMS: aSlotsAlm })); }
+                self._updateOrderSummaryScannedQty(aSlotsCin, aSlotsAlm);
+
+                // Merge y POST al backend
+                var slotTipo = oView.byId("slotType").getValue();
+                var aEdited = [
+                    { attribute: "SLOTTIPO",             value: slotTipo },
+                    { attribute: "SLOTQTY_CINTAS_EF02",  value: oRefresh.iQtyCin.toString() },
+                    { attribute: "SLOTQTY_ALAMBRE_EF02", value: oRefresh.iQtyAlm.toString() }
+                ].concat(aAllSlots.map(function (slot) { return { attribute: slot.attribute, value: slot.value }; }));
+
+                var oSapApi = self.getPublicApiRestDataSourceUri();
+                var sParams = { plant: oPODParams.PLANT_ID, workCenter: oPODParams.WORK_CENTER };
+
+                self.getWorkCenterCustomValues(sParams, oSapApi).then(function (oOriginalRes) {
+                    var aOriginal = self._getValidatedCustomValues(oOriginalRes, oBundle);
+                    if (!aOriginal) { return; }
+
+                    var editedMap = {};
+                    aEdited.forEach(function (item) { editedMap[item.attribute] = item.value; });
+
+                    var aFinal = aOriginal.map(function (item) {
+                        return { attribute: item.attribute, value: editedMap.hasOwnProperty(item.attribute) ? editedMap[item.attribute] : item.value };
+                    });
+                    for (var key in editedMap) {
+                        if (!aFinal.find(function (i) { return i.attribute === key; })) {
+                            aFinal.push({ attribute: key, value: editedMap[key] });
+                        }
+                    }
+
+                    self.setCustomValuesPp({
+                        inCustomValues: aFinal,
+                        inPlant: oPODParams.PLANT_ID,
+                        inWorkCenter: oPODParams.WORK_CENTER
+                    }, oSapApi).then(function () {
+                        sap.m.MessageToast.show(oBundle.getText("cantidadActualizada"));
+                    }).catch(function () {
+                        sap.m.MessageToast.show(oBundle.getText("errorActualizarSlot"));
+                    });
+                });
+            }.bind(this));
         },
 
         onAfterRendering: function () {
             this.onGetCustomValues();
             this.onGetOrderCustomValues();
+            this.setOrderSummary();
         },
         _getCurrentOperationStatus: function () {
             var oPodSelectionModel = this.getPodSelectionModel();
             var sCurrentStatus = "";
 
-            
+
             if (oPodSelectionModel && oPodSelectionModel.selectedPhaseData) {
                 sCurrentStatus = oPodSelectionModel.selectedPhaseData.status || "";
             }
@@ -99,6 +239,361 @@ sap.ui.define([
 
             return sCurrentStatus;
         },
+        onGetBOMData: function () {
+            // Replaced by setOrderSummary() — kept as no-op for compatibility
+        },
+
+        _formatLoteQty: function (vCantidad) {
+            var n = parseFloat(vCantidad);
+            return isNaN(n) ? "" : n.toFixed(2);
+        },
+
+        summarizeByErpSequence: function (aComponents) {
+            var mGroups = {};
+            var aOrder = [];
+            aComponents.forEach(function (oComp) {
+                var sKey = oComp.erpSequence !== undefined && oComp.erpSequence !== null
+                    ? String(oComp.erpSequence) : String(oComp.sequence);
+                if (!mGroups[sKey]) {
+                    mGroups[sKey] = {
+                        erpSequence: oComp.erpSequence, sequence: oComp.sequence,
+                        material: oComp.material, unitOfMeasure: oComp.unitOfMeasure,
+                        componentType: oComp.componentType,
+                        quantity: 0, totalQuantity: 0
+                    };
+                    aOrder.push(sKey);
+                }
+                mGroups[sKey].quantity += Number(oComp.quantity || 0);
+                mGroups[sKey].totalQuantity += Number(oComp.totalQuantity || 0);
+            });
+            return aOrder.map(function (sKey) { return mGroups[sKey]; });
+        },
+
+        setOrderSummary: function () {
+            var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
+            var oSapApi = this.getPublicApiRestDataSourceUri();
+            var oBundle = this.getView().getModel("i18n").getResourceBundle();
+            var oParams = {
+                plant: oPODParams.PLANT_ID,
+                bom: oPODParams.BOM_ID,
+                type: "SHOP_ORDER"
+            };
+
+            this.getOrderSummary(oParams, oSapApi)
+                .then(function (data) {
+                    var oBomData = Array.isArray(data) ? data[0] : data;
+                    var aComponents = (oBomData && Array.isArray(oBomData.components)) ? oBomData.components : [];
+                    var aNormalComponents = aComponents.filter(function (oComp) {
+                        return oComp && oComp.componentType === "NORMAL";
+                    });
+
+                    if (aNormalComponents.length === 0) {
+                        console.warn("[OrderSummary] No se encontró componente NORMAL en BOM");
+                        return;
+                    }
+
+                    var aGrouped = this.summarizeByErpSequence(aNormalComponents);
+                    aGrouped.sort(function (a, b) { return (a.erpSequence || 0) - (b.erpSequence || 0); });
+                    var oOrderSummaryModel = this.getView().getModel("orderSummary");
+
+                    // CINTAS principal: UoM "KG" (Cinta RC = peso en kg).
+                    // ALAMBRE secundario: UoM "M" (Alambre = metros de alambre).
+                    var oCompCintas = aGrouped.find(function (g) { return (g.unitOfMeasure || "").toUpperCase() === "KG"; })
+                        || aGrouped[0] || {};
+
+                    var oCompAlambre = aGrouped.find(function (g) {
+                        return g !== oCompCintas && (g.unitOfMeasure || "").toUpperCase() === "M";
+                    }) || aGrouped.find(function (g) {
+                        return g !== oCompCintas;
+                    }) || null;
+
+                    var sMaterial1 = (oCompCintas.material && oCompCintas.material.material) || "";
+                    var sMaterial2 = oCompAlambre ? ((oCompAlambre.material && oCompAlambre.material.material) || "") : "";
+
+                    oOrderSummaryModel.setProperty("/material", sMaterial1);
+                    oOrderSummaryModel.setProperty("/cantidadNecesaria", Number(oCompCintas.totalQuantity || 0));
+                    oOrderSummaryModel.setProperty("/cantidadConsumida", 0);
+                    oOrderSummaryModel.setProperty("/unidadMedida", oCompCintas.unitOfMeasure || "");
+
+                    if (oCompAlambre) {
+                        oOrderSummaryModel.setProperty("/material2", sMaterial2);
+                        oOrderSummaryModel.setProperty("/cantidadNecesaria2", Number(oCompAlambre.totalQuantity || 0));
+                        oOrderSummaryModel.setProperty("/cantidadConsumida2", 0);
+                        oOrderSummaryModel.setProperty("/unidadMedida2", oCompAlambre.unitOfMeasure || "");
+                    }
+
+                    var aPromesas = [
+                        this.getHeaderMaterial({ material: sMaterial1, plant: oPODParams.PLANT_ID }, oSapApi),
+                        oCompAlambre
+                            ? this.getHeaderMaterial({ material: sMaterial2, plant: oPODParams.PLANT_ID }, oSapApi)
+                            : Promise.resolve(null)
+                    ];
+
+                    Promise.all(aPromesas)
+                        .then(function (headerData) {
+                            var oHeader1 = Array.isArray(headerData[0]) ? headerData[0][0] : headerData[0];
+                            var oHeader2 = Array.isArray(headerData[1]) ? headerData[1][0] : headerData[1];
+
+                            var descripcion1 = (oHeader1 && oHeader1.description) || "";
+                            var descripcion2 = (oHeader2 && oHeader2.description) || "";
+
+                            oOrderSummaryModel.setProperty("/descripcion", descripcion1);
+                            oOrderSummaryModel.setProperty("/labelCintas", "CINTAS" + (descripcion1 ? " - " + descripcion1 : (sMaterial1 ? " - " + sMaterial1 : "")));
+                            if (oCompAlambre) {
+                                oOrderSummaryModel.setProperty("/descripcion2", descripcion2);
+                                oOrderSummaryModel.setProperty("/labelAlambre", "ALAMBRE" + (descripcion2 ? " - " + descripcion2 : (sMaterial2 ? " - " + sMaterial2 : "")));
+                            } else {
+                                oOrderSummaryModel.setProperty("/descripcion2", "");
+                                oOrderSummaryModel.setProperty("/labelAlambre", "ALAMBRE");
+                            }
+
+                            // Encadenar consulta de cantidad consumida (GoodsIssue)
+                            return this.getGoodsIssueSummary({
+                                plant: oPODParams.PLANT_ID,
+                                order: oPODParams.ORDER_ID,
+                                sfc: oPODParams.SFC,
+                                operationActivity: oPODParams.OPERATION_ACTIVITY,
+                                stepId: oPODParams.STEP_ID
+                            }, oSapApi).catch(function () { return null; });
+                        }.bind(this))
+                        .then(function (oGoodsData) {
+                            // Mapear cantidadConsumida por material desde lineItems
+                            var aLineItems = (oGoodsData && Array.isArray(oGoodsData.lineItems)) ? oGoodsData.lineItems : [];
+                            var oConsumoMap = {};
+                            aLineItems.forEach(function (oItem) {
+                                var sMat = (oItem.materialId && oItem.materialId.material) || "";
+                                var nConsumo = (oItem.consumedQuantity && oItem.consumedQuantity.value) || 0;
+                                if (sMat) { oConsumoMap[sMat.toUpperCase()] = nConsumo; }
+                            });
+                            oOrderSummaryModel.setProperty("/cantidadConsumida", oConsumoMap[(sMaterial1 || "").toUpperCase()] || 0);
+                            if (oCompAlambre) {
+                                oOrderSummaryModel.setProperty("/cantidadConsumida2", oConsumoMap[(sMaterial2 || "").toUpperCase()] || 0);
+                            }
+
+                            var oView = this.getView();
+                            var aItemsCin = (oView.byId("idSlotTableCintas") && oView.byId("idSlotTableCintas").getModel())
+                                ? oView.byId("idSlotTableCintas").getModel().getProperty("/ITEMS") : [];
+                            var aItemsAlm = (oView.byId("idSlotTableAlambre") && oView.byId("idSlotTableAlambre").getModel())
+                                ? oView.byId("idSlotTableAlambre").getModel().getProperty("/ITEMS") : [];
+                            this._updateOrderSummaryScannedQty(aItemsCin, aItemsAlm);
+                        }.bind(this))
+                        .catch(function (error) {
+                            console.error("[OrderSummary] Error obteniendo descripciones:", error);
+                            sap.m.MessageToast.show(oBundle.getText("errorObtenerHeaderMaterial", [""]));
+                        }.bind(this));
+                }.bind(this))
+                .catch(function (error) {
+                    console.error("[OrderSummary] Error:", error);
+                    sap.m.MessageToast.show(oBundle.getText("errorObtenerBom", [oPODParams.ORDER_ID || ""]));
+                }.bind(this));
+        },
+
+        _updateOrderSummaryScannedQty: function (aItemsCintas, aItemsAlambre) {
+            var oOrderSummaryModel = this.getView().getModel("orderSummary");
+            if (!oOrderSummaryModel) { return; }
+
+            var fnSumQty = function (aItems) {
+                var arr = Array.isArray(aItems) ? aItems : [];
+                return arr.reduce(function (nTotal, oItem) {
+                    if (!oItem || !oItem.value) { return nTotal; }
+                    var nQty = parseFloat(oItem.cantidadAsignada);
+                    if (isNaN(nQty)) { nQty = parseFloat(oItem.loteQty); }
+                    return nTotal + (isNaN(nQty) ? 0 : nQty);
+                }, 0);
+            };
+
+            oOrderSummaryModel.setProperty("/cantidadEscaneada",  Number(fnSumQty(aItemsCintas).toFixed(2)));
+            oOrderSummaryModel.setProperty("/cantidadEscaneada2", Number(fnSumQty(aItemsAlambre).toFixed(2)));
+        },
+
+        onPressOpenFragmentList: function (oEvent) {
+            var oView = this.getView();
+            var oSource = oEvent.getSource();
+            var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
+            var oBundle = oView.getModel("i18n").getResourceBundle();
+            var oOrderSummaryModel = oView.getModel("orderSummary");
+
+            // Determinar grupo: primero por contexto de tabla (Button → Toolbar → Table),
+            // con fallback a CustomData. Si no es ALAMBRE, fuerza CINTAS.
+            var sGrupo = ((oSource.data("grupo") || "") + "").trim().toUpperCase();
+            var oToolbar = oSource.getParent && oSource.getParent();      // Toolbar
+            var oTableCtx = oToolbar && oToolbar.getParent && oToolbar.getParent(); // Table
+            if (oTableCtx && oTableCtx.getId) {
+                if (oTableCtx.getId() === oView.createId("idSlotTableCintas")) {
+                    sGrupo = "CINTAS";
+                } else if (oTableCtx.getId() === oView.createId("idSlotTableAlambre")) {
+                    sGrupo = "ALAMBRE";
+                }
+            }
+            if (sGrupo !== "ALAMBRE") {
+                sGrupo = "CINTAS";
+            }
+
+            var sMaterial, nCantidadRequerida, sFragId, sDialogId;
+            if (sGrupo === "CINTAS") {
+                sMaterial          = oOrderSummaryModel ? oOrderSummaryModel.getProperty("/material")         : "";
+                nCantidadRequerida = oOrderSummaryModel ? oOrderSummaryModel.getProperty("/cantidadNecesaria") : 0;
+                sFragId   = oView.getId() + "--Cintas";
+                sDialogId = "Cintas--batchListDialog";
+            } else {
+                sMaterial          = oOrderSummaryModel ? oOrderSummaryModel.getProperty("/material2")          : "";
+                nCantidadRequerida = oOrderSummaryModel ? oOrderSummaryModel.getProperty("/cantidadNecesaria2") : 0;
+                sFragId   = oView.getId();
+                sDialogId = "batchListDialog";
+            }
+
+            if (!sMaterial) {
+                sap.m.MessageToast.show(oBundle.getText("errorObtenerHeaderMaterial", [""]));
+                return;
+            }
+
+            var oThis = this;
+            if (!this.byId(sDialogId)) {
+                Fragment.load({
+                    id: sFragId,
+                    name: "serviacero.custom.plugins.zpluginPutBatchWCEF02.zpluginPutBatchWCEF02.fragment.batchList",
+                    controller: this
+                }).then(function (oPopover) {
+                    oView.addDependent(oPopover);
+                    oPopover.openBy(oSource);
+                    oThis.enlistarInventario(oPODParams.PLANT_ID, oPODParams.ORDER_ID, sMaterial, nCantidadRequerida, sDialogId);
+                });
+            } else {
+                this.byId(sDialogId).openBy(oSource);
+                this.enlistarInventario(oPODParams.PLANT_ID, oPODParams.ORDER_ID, sMaterial, nCantidadRequerida, sDialogId);
+            }
+        },
+
+        enlistarInventario: function (sPlant, sOrden, sMaterial, nCantidadRequerida, sDialogId) {
+            var oView = this.getView();
+            var oSapApi = this.getPublicApiRestDataSourceUri();
+            var oBundle = oView.getModel("i18n").getResourceBundle();
+            var oDialog = this.byId(sDialogId || "batchListDialog");
+
+            if (!oDialog) { return; }
+
+            // Limpiar busy previo por si una llamada anterior quedó pendiente
+            oDialog.setBusy(false);
+            oDialog.setModel(new JSONModel({ ITEMS: [] }));
+            oDialog.setBusy(true);
+
+            var oParams = {
+                inPlanta: sPlant,
+                inOrden: sOrden,
+                inMaterial: sMaterial
+            };
+
+            this.ajaxPostRequest(oSapApi + this.ApiPaths.getLotesMaterialStock, oParams,
+                function (oRes) {
+                    if (oDialog.bIsDestroyed) { return; }
+                    oDialog.setBusy(false);
+                    var aData = Array.isArray(oRes) ? oRes
+                        : (Array.isArray(oRes && oRes.stockResponse) ? oRes.stockResponse
+                            : (Array.isArray(oRes && oRes.outLotes) ? oRes.outLotes
+                                : (Array.isArray(oRes && oRes.content) ? oRes.content : [])));
+
+                    var aItems = aData.map(function (oItem) {
+                        var sMat = oItem.material;
+                        var sLote = oItem.batchNumber;
+                        var nCantidad = parseFloat((oItem.quantityOnHand && oItem.quantityOnHand.value) || 0);
+                        return {
+                            MATERIAL: sMat,
+                            LOTE: sLote,
+                            CANTIDAD: nCantidad.toFixed(2),
+                            CODIGO: sMat + "!" + sLote
+                        };
+                    });
+
+                    oDialog.setModel(new JSONModel({ ITEMS: aItems }));
+                }.bind(this),
+                function () {
+                    if (oDialog.bIsDestroyed) { return; }
+                    oDialog.setBusy(false);
+                    sap.m.MessageToast.show(oBundle.getText("errorObtenerDatosOriginales") || "Error al obtener lotes");
+                }.bind(this)
+            );
+        },
+
+        onConfirmSendBatchChars: function (oEvent) {
+            var oSource = oEvent.getSource();
+            var oPopover = oSource.getParent ? oSource.getParent() : null;
+            if (!oPopover || oPopover.bIsDestroyed) {
+                // fallback: cerrar ambos si no se puede resolver desde evento
+                var oCin = this.byId("Cintas--batchListDialog");
+                var oAlm = this.byId("batchListDialog");
+                if (oCin && !oCin.bIsDestroyed) { oCin.close(); }
+                if (oAlm && !oAlm.bIsDestroyed) { oAlm.close(); }
+            } else {
+                oPopover.close();
+            }
+        },
+
+        onCopiarCodigo: function (oEvent) {
+            var oBundle = this.getView().getModel("i18n").getResourceBundle();
+            var oContext = oEvent.getSource().getBindingContext();
+            var sCodigo = oContext ? oContext.getProperty("CODIGO") : "";
+            if (!sCodigo) { return; }
+            navigator.clipboard.writeText(sCodigo).then(function () {
+                sap.m.MessageToast.show(oBundle.getText("codigoCopiado", [sCodigo]));
+            }).catch(function () {
+                var oInput = document.createElement("input");
+                oInput.value = sCodigo;
+                document.body.appendChild(oInput);
+                oInput.select();
+                document.execCommand("copy");
+                document.body.removeChild(oInput);
+                sap.m.MessageToast.show(oBundle.getText("codigoCopiado", [sCodigo]));
+            });
+        },
+
+        onCloseDialogBatchChars: function (oEvent) {
+            var oSource = oEvent.getSource();
+            // Button → OverflowToolbar (footer) → Popover
+            var oToolbar = oSource.getParent ? oSource.getParent() : null;
+            var oPopover = oToolbar && oToolbar.getParent ? oToolbar.getParent() : null;
+            if (oPopover && !oPopover.bIsDestroyed) { oPopover.close(); }
+        },
+
+        onAfterClosePopoverInventario: function () {
+            var oCin = this.byId("Cintas--batchListDialog");
+            var oAlm = this.byId("batchListDialog");
+            // Verificar isOpen() antes de limpiar busy:
+            // evita la condición de carrera donde afterClose dispara después de que
+            // el usuario ya re-abrió el dialog (y enlistarInventario ya puso setBusy(true))
+            if (oCin && !oCin.bIsDestroyed && !oCin.isOpen()) { oCin.setBusy(false); }
+            if (oAlm && !oAlm.bIsDestroyed && !oAlm.isOpen()) { oAlm.setBusy(false); }
+        },
+
+        getHeaderMaterial: function (sParams, oSapApi) {
+            return new Promise(function (resolve, reject) {
+                this.ajaxGetRequest(oSapApi + this.ApiPaths.HEADER_MATERIAL, sParams, function (oRes) {
+                    resolve(oRes);
+                }.bind(this), function (oRes) {
+                    reject(oRes);
+                }.bind(this));
+            }.bind(this));
+        },
+
+        getOrderSummary: function (sParams, oSapApi) {
+            return new Promise(function (resolve, reject) {
+                this.ajaxGetRequest(oSapApi + this.ApiPaths.BOMS, sParams, function (oRes) {
+                    resolve(oRes);
+                }.bind(this), function (oRes) {
+                    reject(oRes);
+                }.bind(this));
+            }.bind(this));
+        },
+
+        getGoodsIssueSummary: function (sParams, oSapApi) {
+            return new Promise(function (resolve, reject) {
+                this.ajaxGetRequest(oSapApi + this.ApiPaths.GOODSISSUES_SUMMARY, sParams, function (oRes) {
+                    resolve(oRes);
+                }.bind(this), function (oRes) {
+                    reject(oRes);
+                }.bind(this));
+            }.bind(this));
+        },
+
         onGetCustomValues: function () {
             var oView = this.getView();
             var oSapApi = this.getPublicApiRestDataSourceUri();
@@ -118,28 +613,39 @@ sap.ui.define([
                 var aCustomValues = oData.customValues;
                 var noCargaSlot = aCustomValues.find(function (el) { return el.attribute === "NO_CARGA"; }) || { value: "0" };
                 var tipoSlot = aCustomValues.find(function (el) { return el.attribute === "SLOTTIPO"; }) || { value: "" };
-                var cvQtyCin = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_CIN"; }) || { value: "0" };
-                var cvQtyAlm = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_ALM"; }) || { value: "0" };
+                var cvQtyCin = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_CINTAS_EF02"; }) || { value: "0" };
+                var cvQtyAlm = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_ALAMBRE_EF02"; }) || { value: "0" };
                 var iQtyCin = parseInt(cvQtyCin.value || "0", 10);
                 var iQtyAlm = parseInt(cvQtyAlm.value || "0", 10);
                 var iTotalSlots = iQtyCin + iQtyAlm;
 
-                // Obtener pool de slots (atributos SLOT###)
+                // Construir mapa número → slot para posicionamiento exacto.
+                // Si el EM elimina CVs de cintas vacías, los huecos se rellenan con
+                // placeholders para que el split posicional (slice) sea siempre correcto:
+                // SLOT001 → índice 0, SLOT002 → índice 1, ..., SLOT121 → índice 120, etc.
                 var aAllSlots = aCustomValues.filter(function (item) {
-                    return item.attribute.startsWith("SLOT") &&
-                        item.attribute !== "SLOTQTY_CIN" &&
-                        item.attribute !== "SLOTQTY_ALM" &&
-                        item.attribute !== "SLOTTIPO";
+                    return /^SLOT\d{3}$/.test(item.attribute);
                 });
+                var oSlotByNum = {};
+                aAllSlots.forEach(function (slot) {
+                    oSlotByNum[parseInt(slot.attribute.replace("SLOT", ""), 10)] = slot;
+                });
+                var aSlotsFixed = [];
+                for (var i = 1; i <= iTotalSlots; i++) {
+                    aSlotsFixed.push(oSlotByNum[i] || { attribute: "SLOT" + i.toString().padStart(3, "0"), value: "" });
+                }
 
-                // Normalizar: recortar o rellenar hasta iTotalSlots
-                var aSlotsFixed = aAllSlots.slice();
-                if (aSlotsFixed.length > iTotalSlots && iTotalSlots > 0) {
-                    aSlotsFixed = aSlotsFixed.slice(0, iTotalSlots);
-                }
-                for (var i = aSlotsFixed.length + 1; i <= iTotalSlots; i++) {
-                    aSlotsFixed.push({ attribute: "SLOT" + i.toString().padStart(3, "0"), value: "" });
-                }
+                // Poblar cantidadAsignada desde el valor almacenado (formato MAT!LOTE!CANTIDAD!SEQ!CANTIDAD_PENDIENTE)
+                aSlotsFixed.forEach(function (slot) {
+                    if (slot.value) {
+                        var parts = slot.value.split('!');
+                        slot.cantidadAsignada = parts.length >= 4 ? (parts[2] || "") : "";
+                    } else {
+                        slot.cantidadAsignada = "";
+                    }
+                    slot.loteQty = slot.loteQty || "";
+                    slot.loteUom = slot.loteUom || "";
+                });
 
                 // Repartir: primeros iQtyCin → cintas, siguientes iQtyAlm → alambre
                 var aSlotsCin = aSlotsFixed.slice(0, iQtyCin);
@@ -161,6 +667,12 @@ sap.ui.define([
                 oView.byId("slotQty").setValue(sActiveKey === "CINTAS" ? iQtyCin.toString() : iQtyAlm.toString());
 
                 this._updateProgressIndicator();
+                this._updateOrderSummaryScannedQty(aSlotsCin, aSlotsAlm);
+
+                // Auto-inicializar Carga 1 si aún no hay cintas configuradas
+                if (iQtyCin === 0) {
+                    this._autoInitCargaIfNeeded();
+                }
             }.bind(this));
         },
         /**
@@ -200,25 +712,24 @@ sap.ui.define([
                 }
 
                 var aCustomValues = oData.customValues;
-                var cvQtyCin = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_CIN"; }) || { value: "0" };
-                var cvQtyAlm = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_ALM"; }) || { value: "0" };
+                var cvQtyCin = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_CINTAS_EF02"; }) || { value: "0" };
+                var cvQtyAlm = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_ALAMBRE_EF02"; }) || { value: "0" };
                 var iQtyCin = parseInt(cvQtyCin.value || "0", 10);
                 var iQtyAlm = parseInt(cvQtyAlm.value || "0", 10);
                 var iTotalSlots = iQtyCin + iQtyAlm;
 
                 var aAllSlots = aCustomValues.filter(function (item) {
-                    return item.attribute.startsWith("SLOT") &&
-                        item.attribute !== "SLOTQTY_CIN" &&
-                        item.attribute !== "SLOTQTY_ALM" &&
-                        item.attribute !== "SLOTTIPO";
+                    return /^SLOT\d{3}$/.test(item.attribute);
                 });
-
-                var aSlotsFixed = aAllSlots.slice();
-                if (aSlotsFixed.length > iTotalSlots && iTotalSlots > 0) {
-                    aSlotsFixed = aSlotsFixed.slice(0, iTotalSlots);
-                }
-                for (var i = aSlotsFixed.length + 1; i <= iTotalSlots; i++) {
-                    aSlotsFixed.push({ attribute: "SLOT" + i.toString().padStart(3, "0"), value: "" });
+                // Posicionamiento exacto por número: SLOT001 → índice 0, SLOT121 → índice 120, etc.
+                // Huecos (CVs eliminados por EM) se rellenan con placeholders vacíos.
+                var oSlotByNum = {};
+                aAllSlots.forEach(function (slot) {
+                    oSlotByNum[parseInt(slot.attribute.replace("SLOT", ""), 10)] = slot;
+                });
+                var aSlotsFixed = [];
+                for (var i = 1; i <= iTotalSlots; i++) {
+                    aSlotsFixed.push(oSlotByNum[i] || { attribute: "SLOT" + i.toString().padStart(3, "0"), value: "" });
                 }
 
                 // Restaurar campos del modelo anterior
@@ -243,17 +754,6 @@ sap.ui.define([
                 if (oTableCin) { oTableCin.setModel(new sap.ui.model.json.JSONModel({ ITEMS: aSlotsCin })); }
                 if (oTableAlm) { oTableAlm.setModel(new sap.ui.model.json.JSONModel({ ITEMS: aSlotsAlm })); }
 
-                // Resincronizar contador de secuencia
-                var aSlotsConValor = aSlotsFixed.filter(function (s) { return s.value && s.value.trim() !== ""; });
-                if (aSlotsConValor.length === 0) {
-                    this.iSecuenciaCounter = 0;
-                } else {
-                    this.iSecuenciaCounter = Math.max.apply(null, aSlotsConValor.map(function (s) {
-                        var p = (s.value || "").split('!');
-                        return parseInt((p.length >= 4 ? p[3] : p[2]) || 0, 10);
-                    }));
-                }
-
                 var sActiveKey = oView.byId("tableToggle").getSelectedKey() || "CINTAS";
                 return {
                     slots: sActiveKey === "CINTAS" ? aSlotsCin : aSlotsAlm,
@@ -267,16 +767,15 @@ sap.ui.define([
             }.bind(this));
         },
         /**
-        * Botón "Iniciar Carga":
-        *  - CINTAS: cantidad tomada automáticamente de la característica de orden (CT_100035_500 / CT_100038_500), sin diálogo.
-        *  - ALAMBRE: el operador ingresa la cantidad en un diálogo.
-        * @returns {void}
-        */
+         * Botón "Iniciar Carga": solo aplica para CINTAS.
+         * Usa la cantidad de SLOTQTY_CINTAS_EF02, valida que la carga actual esté completa,
+         * incrementa NO_CARGA y vacía los slots de cintas.
+         * El alambre persiste a través de las cargas.
+         * @returns {void}
+         */
         onInicioEscaneo: function () {
             var oView = this.getView();
             var oBundle = oView.getModel("i18n").getResourceBundle();
-            var sActiveKey = this._getActiveKey();
-            var self = this;
 
             var sCurrentStatus = this._getCurrentOperationStatus();
             if (sCurrentStatus !== OPERATION_STATUS.ACTIVE) {
@@ -284,81 +783,20 @@ sap.ui.define([
                 return;
             }
 
-            // Validar que la tabla activa esté completa antes de iniciar nueva carga
-            var oTable = this._getActiveTable();
-            var oModel = oTable.getModel();
-            var aItems = oModel ? oModel.getProperty("/ITEMS") : [];
-            var sQtyId = sActiveKey === "CINTAS" ? "slotQty_cintas" : "slotQty_alambre";
-            var iSlotQty = parseInt(oView.byId(sQtyId).getValue() || "0", 10);
-            var iEscaneados = aItems.filter(function (slot) { return slot.value && slot.value.trim() !== ""; }).length;
-
-            if (iSlotQty > 0 && iEscaneados < iSlotQty) {
-                var iFaltantes = iSlotQty - iEscaneados;
+            if (!this._suggestedQtyCintas || this._suggestedQtyCintas <= 0) {
                 sap.m.MessageBox.warning(
-                    oBundle.getText("cargaIncompleta", [iEscaneados, iSlotQty, iFaltantes]),
-                    { title: oBundle.getText("cargaIncompletaTitle") }
+                    oBundle.getText("sinCantidadSugerida"),
+                    { title: oBundle.getText("sinCantidadSugeridaTitle") }
                 );
                 return;
             }
 
-            if (sActiveKey === "CINTAS") {
-                // --- Cintas: usar cantidad de la característica de orden directamente ---
-                if (!this._suggestedQtyCintas || this._suggestedQtyCintas <= 0) {
-                    sap.m.MessageBox.warning(
-                        oBundle.getText("sinCantidadSugerida"),
-                        { title: oBundle.getText("sinCantidadSugeridaTitle") }
-                    );
-                    return;
-                }
-                this._iniciarNuevaCarga(this._suggestedQtyCintas, "CINTAS");
-
-            } else {
-                // --- Alambre: el operador ingresa la cantidad ---
-                var oQuantityInput = new Input({
-                    type: "Number",
-                    value: "",
-                    placeholder: oBundle.getText("cantidadPlaceholder") || "Ej: 35",
-                    liveChange: function (oEvent) {
-                        var iValue = parseInt(oEvent.getSource().getValue(), 10);
-                        oOkButton.setEnabled(iValue > 0);
-                    }
-                });
-
-                var oOkButton = new Button({
-                    text: oBundle.getText("okButton") || "OK",
-                    enabled: false,
-                    press: function () {
-                        var iCantidad = parseInt(oQuantityInput.getValue(), 10);
-                        if (iCantidad > 0) {
-                            oDialog.close();
-                            self._iniciarNuevaCarga(iCantidad, "ALAMBRE");
-                        } else {
-                            sap.m.MessageToast.show(oBundle.getText("cantidadInvalida"));
-                        }
-                    }
-                });
-
-                var oCancelButton = new Button({
-                    text: oBundle.getText("cancelButton") || "Cancelar",
-                    type: "Reject",
-                    press: function () { oDialog.close(); }
-                });
-
-                var oDialog = new Dialog({
-                    title: oBundle.getText("iniciarCargaAlambreTitle") || "Iniciar Carga - Alambre",
-                    content: [oQuantityInput],
-                    buttons: [oOkButton, oCancelButton],
-                    afterClose: function () { oDialog.destroy(); }
-                });
-
-                oDialog.open();
-                oQuantityInput.focus();
-            }
+            this._iniciarNuevaCarga(this._suggestedQtyCintas);
         },
         /**
-        * Finalizar carga: ajustar SLOTQTY_CIN/ALM al número real escaneado en ambas tablas
-        * @returns {void}
-        */
+         * [Eliminado] — el flujo de Finalizar Carga fue removido del diseño.
+         * Se mantiene como stub para no romper referencias antiguas.
+         */
         onFinalizarCarga: function () {
             var oView = this.getView();
             var oBundle = oView.getModel("i18n").getResourceBundle();
@@ -476,49 +914,39 @@ sap.ui.define([
         },
         clearModel: function () {
             var oView = this.getView();
-            var sActiveKey = this._getActiveKey();
-            var oTable = this._getActiveTable();
             var oScanInput = oView.byId("scanInput");
-            var oModel = oTable.getModel();
             var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
             var oBundle = oView.getModel("i18n").getResourceBundle();
             var self = this;
 
-            var aItems = oModel ? (oModel.getProperty("/ITEMS") || []) : [];
-            if (aItems.length === 0) {
-                sap.m.MessageToast.show(oBundle.getText("noDataToClear"));
-                return;
-            }
-
-            // Vaciar valores manteniendo los atributos
-            aItems.forEach(function (item) {
-                item.value = "";
-                item.loteQty = "";
-                item.loteUom = "";
-            });
-            oModel.setProperty("/ITEMS", aItems);
-            oModel.refresh(true);
-            oScanInput.setValue("");
-            oScanInput.focus();
-            this._updateProgressIndicator();
-
-            // Construir pool completo con ambas tablas para el update
+            // Construir pool completo con ambas tablas
             var oTableCin = oView.byId("idSlotTableCintas");
             var oTableAlm = oView.byId("idSlotTableAlambre");
             var aSlotsCin = (oTableCin && oTableCin.getModel()) ? (oTableCin.getModel().getProperty("/ITEMS") || []) : [];
             var aSlotsAlm = (oTableAlm && oTableAlm.getModel()) ? (oTableAlm.getModel().getProperty("/ITEMS") || []) : [];
+
+            var bHayLotes = aSlotsCin.some(function (s) { return s.value && s.value.trim(); }) ||
+                            aSlotsAlm.some(function (s) { return s.value && s.value.trim(); });
+            if (!bHayLotes) {
+                sap.m.MessageToast.show(oBundle.getText("noDataToClear"));
+                return;
+            }
+
+            // Vaciar valores de AMBAS tablas manteniendo atributos y filas fijas
+            aSlotsCin.forEach(function (item) { item.value = ""; item.loteQty = ""; item.loteUom = ""; item.cantidadAsignada = ""; });
+            aSlotsAlm.forEach(function (item) { item.value = ""; item.loteQty = ""; item.loteUom = ""; item.cantidadAsignada = ""; });
+            if (oTableCin && oTableCin.getModel()) { oTableCin.getModel().setProperty("/ITEMS", aSlotsCin); oTableCin.getModel().refresh(true); }
+            if (oTableAlm && oTableAlm.getModel()) { oTableAlm.getModel().setProperty("/ITEMS", aSlotsAlm); oTableAlm.getModel().refresh(true); }
+            oScanInput.setValue("");
+            oScanInput.focus();
+            this._updateProgressIndicator();
+            this._updateOrderSummaryScannedQty(aSlotsCin, aSlotsAlm);
+
             var aAllSlots = [].concat(aSlotsCin, aSlotsAlm);
-
             var slotTipo = oView.byId("slotType").getValue();
-            // Resetear la cantidad de la tabla activa a 0; la otra tabla mantiene su cantidad
-            var iQtyCin = sActiveKey === "CINTAS" ? 0 : parseInt(oView.byId("slotQty_cintas").getValue() || "0", 10);
-            var iQtyAlm = sActiveKey === "ALAMBRE" ? 0 : parseInt(oView.byId("slotQty_alambre").getValue() || "0", 10);
-
+            // SLOTQTY y NO_CARGA se conservan; solo se vacían los valores de los slots
             var aEdited = [
-                { attribute: "SLOTTIPO", value: slotTipo },
-                { attribute: "SLOTQTY_CIN", value: iQtyCin.toString() },
-                { attribute: "SLOTQTY_ALM", value: iQtyAlm.toString() },
-                { attribute: "NO_CARGA", value: "0" }
+                { attribute: "SLOTTIPO", value: slotTipo }
             ].concat(aAllSlots.map(function (slot) { return { attribute: slot.attribute, value: slot.value }; }));
 
             var oSapApi = this.getPublicApiRestDataSourceUri();
@@ -526,7 +954,7 @@ sap.ui.define([
 
             this.getWorkCenterCustomValues(sParams, oSapApi).then(function (oOriginalRes) {
                 var aOriginal = self._getValidatedCustomValues(oOriginalRes, oBundle);
-                if (!aOriginal) { self.onGetCustomValues(); return; }
+                if (!aOriginal) { return; }
 
                 var aEditMap = {};
                 aEdited.forEach(function (item) { aEditMap[item.attribute] = item.value; });
@@ -546,10 +974,8 @@ sap.ui.define([
                     inWorkCenter: oPODParams.WORK_CENTER
                 }, oSapApi).then(function () {
                     sap.m.MessageToast.show(oBundle.getText("dataClearedSuccess"));
-                    setTimeout(function () { self.onGetCustomValues(); }, 500);
                 }).catch(function () {
                     sap.m.MessageToast.show(oBundle.getText("errorClearing"));
-                    self.onGetCustomValues();
                 });
             }).catch(function () {
                 sap.m.MessageToast.show(oBundle.getText("errorObtenerDatos"));
@@ -627,13 +1053,18 @@ sap.ui.define([
                             }
 
                             if (bEsValido) {
+                                const sCantidadLote = this._formatLoteQty(oResponseData.outCantidadLote);
+                                const sUomLote = oResponseData.outOUMLote || "";
                                 // Detectar de dónde vino el escaneo
                                 if (!this._slotContext) {
                                     // Viene del input superior → buscar slot vacío
-                                    this._ejecutarUpdate();
+                                    // Pasar el barcode ya validado para evitar race condition con el input
+                                    this._ejecutarUpdate(sCantidadLote, sUomLote, materialEscaneado + "!" + loteEscaneado);
                                 } else {
                                     // Viene del botón por fila → actualizar ese slot
-                                    this._procesarSlotValidado();
+                                    this._slotContext.loteQty = sCantidadLote;
+                                    this._slotContext.uom = sUomLote;
+                                    this._procesarSlotValidado(sCantidadLote, sUomLote);
                                 }
                             } else {
                                 sap.m.MessageToast.show(oBundle.getText("loteNoValido"));
@@ -676,14 +1107,24 @@ sap.ui.define([
                 }.bind(this)
             );
         },
-        _ejecutarUpdate: function () {
+        _ejecutarUpdate: function (sCantidadLote, sUom, sBarcodeIn) {
             var oView = this.getView();
             var oInput = oView.byId("scanInput");
-            var sBarcode = oInput.getValue().trim();
+            // Usar el barcode pasado como parámetro (capturado antes de la validación async)
+            // para evitar race condition si el input es limpiado mientras se valida.
+            var sBarcode = sBarcodeIn || oInput.getValue().trim();
             var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
             var oBundle = oView.getModel("i18n").getResourceBundle();
             var self = this;
-            var sActiveKey = this._getActiveKey();
+
+            // Enrutar por material del lote escaneado (Cintas vs Alambre)
+            // independientemente del tab activo, para evitar que lotes de Alambre
+            // queden almacenados en slots de Cintas y viceversa.
+            var oOrderSummaryModel = oView.getModel("orderSummary");
+            var sMaterialAlambre = oOrderSummaryModel
+                ? (oOrderSummaryModel.getProperty("/material2") || "").trim().toUpperCase() : "";
+            var sEscaneadoMat = sBarcode.toUpperCase().split("!")[0].trim();
+            var sTargetKey = (sMaterialAlambre && sEscaneadoMat === sMaterialAlambre) ? "ALAMBRE" : "CINTAS";
 
             // Refrescar slots desde backend antes de operar (evitar datos obsoletos)
             this._refreshSlotsFromBackend().then(function (oRefresh) {
@@ -693,14 +1134,14 @@ sap.ui.define([
                     return;
                 }
 
-                // Slots de la tabla activa
-                var aItems = sActiveKey === "CINTAS" ? oRefresh.slotsCin : oRefresh.slotsAlm;
+                // Slots de la tabla destino (por material, no por tab activo)
+                var aItems = sTargetKey === "CINTAS" ? oRefresh.slotsCin : oRefresh.slotsAlm;
 
                 var sNormalizado = sBarcode.toUpperCase();
                 var partsEscaneado = sNormalizado.split('!');
                 var materialLoteEscaneado = partsEscaneado.slice(0, 2).join('!');
 
-                // Verificar duplicado en la tabla activa
+                // Verificar duplicado en la tabla destino
                 var oExiste = aItems.find(function (Item) {
                     var valorItem = (Item.value || "").toString().trim().toUpperCase();
                     if (!valorItem) return false;
@@ -712,20 +1153,26 @@ sap.ui.define([
                     return;
                 }
 
-                // Encontrar primer slot vacío
+                // Encontrar primer slot vacío en la tabla destino
                 var oEmptySlot = aItems.find(function (item) { return !item.value || item.value === ""; });
                 if (oEmptySlot) {
-                    var sNoCarga = oView.byId("noCarga").getValue() || "";
-                    var sBarcodeConSecuencia = sNoCarga ? sBarcode + "!" + sNoCarga : sBarcode;
-                    oEmptySlot.value = sBarcodeConSecuencia;
+                    var sNoCargaEsc = oView.byId("noCarga").getValue() || "1";
+                    var sCantidadPendInit = sCantidadLote || "0.00";
+                    oEmptySlot.value = sBarcode + "!" + (sCantidadLote || "0.00") + "!" + sNoCargaEsc + "!" + sCantidadPendInit;
+                    oEmptySlot.loteQty = sCantidadLote || "";
+                    oEmptySlot.loteUom = sUom || "";
+                    oEmptySlot.cantidadAsignada = sCantidadLote || "";
 
-                    // Actualizar el modelo de la tabla activa
-                    var oActiveTable = sActiveKey === "CINTAS"
+                    // Actualizar el modelo de la tabla destino
+                    var oActiveTable = sTargetKey === "CINTAS"
                         ? oView.byId("idSlotTableCintas")
                         : oView.byId("idSlotTableAlambre");
                     oActiveTable.getModel().setProperty("/ITEMS", aItems);
                     oActiveTable.getModel().refresh(true);
                     self._updateProgressIndicator();
+                    var aUpdCin = sTargetKey === "CINTAS" ? aItems : oRefresh.slotsCin;
+                    var aUpdAlm = sTargetKey === "ALAMBRE" ? aItems : oRefresh.slotsAlm;
+                    self._updateOrderSummaryScannedQty(aUpdCin, aUpdAlm);
                 } else {
                     sap.m.MessageToast.show(oBundle.getText("sinLotes"));
                     return;
@@ -737,8 +1184,8 @@ sap.ui.define([
                 var slotTipo = oView.byId("slotType").getValue();
                 var aEdited = [
                     { attribute: "SLOTTIPO", value: slotTipo },
-                    { attribute: "SLOTQTY_CIN", value: oRefresh.iQtyCin.toString() },
-                    { attribute: "SLOTQTY_ALM", value: oRefresh.iQtyAlm.toString() }
+                    { attribute: "SLOTQTY_CINTAS_EF02", value: oRefresh.iQtyCin.toString() },
+                    { attribute: "SLOTQTY_ALAMBRE_EF02", value: oRefresh.iQtyAlm.toString() }
                 ].concat(oRefresh.allSlots.map(function (slot) {
                     return { attribute: slot.attribute, value: slot.value };
                 }));
@@ -792,7 +1239,15 @@ sap.ui.define([
             sap.m.MessageToast.show("Scan failed: " + oEvent, { duration: 1000 });
         },
         onScanLiveupdate: function (oEvent) {
-            // User can implement the validation about inputting value
+            // Auto-submit al escanear con pistola física (USB/Bluetooth).
+            // La pistola envía todos los caracteres en <150ms; si no llegan
+            // más caracteres en 500ms se asume que el código está completo.
+            clearTimeout(this._oScanDebounceTimer);
+            var sValue = oEvent.getParameter("value") || "";
+            if (!sValue) { return; }
+            this._oScanDebounceTimer = setTimeout(function () {
+                this.onBarcodeSubmit();
+            }.bind(this), 300);
         },
         //funcion del boton #Eliminar-delete elimina un elemento de la tabla activa
         onDeleteSlot: function (oEvent) {
@@ -804,29 +1259,32 @@ sap.ui.define([
             // Detectar en qué tabla está el botón (cintas o alambre)
             var oButton = oEvent.getSource();
             var oItem = oButton.getParent(); // ColumnListItem
-            var oTable = oItem.getParent().getParent(); // Table
+            var oTable = oItem.getParent(); // Table
             var sCintasId = oView.createId("idSlotTableCintas");
-            var sActiveKey = (oTable.getId() === sCintasId) ? "CINTAS" : "ALAMBRE";
 
             var oModel = oTable.getModel();
             var aSlots = oModel.getProperty("/ITEMS");
             var iIndex = oTable.indexOfItem(oItem);
             if (iIndex === -1) { return; }
 
+            var sValueToDelete = aSlots[iIndex] ? (aSlots[iIndex].value || "") : "";
+            var sMaterialLoteEliminado = sValueToDelete.split('!').slice(0, 2).join('!');
+
             // Recorrer los slots hacia arriba para rellenar el hueco
             for (var i = iIndex; i < aSlots.length - 1; i++) {
                 aSlots[i].value = aSlots[i + 1].value;
                 aSlots[i].loteQty = aSlots[i + 1].loteQty;
                 aSlots[i].loteUom = aSlots[i + 1].loteUom;
+                aSlots[i].cantidadAsignada = aSlots[i + 1].cantidadAsignada;
             }
             aSlots[aSlots.length - 1].value = "";
             aSlots[aSlots.length - 1].loteQty = "";
             aSlots[aSlots.length - 1].loteUom = "";
+            aSlots[aSlots.length - 1].cantidadAsignada = "";
 
             oModel.setProperty("/ITEMS", aSlots);
             oModel.refresh(true);
             this._updateProgressIndicator();
-            sap.m.MessageToast.show(oBundle.getText("loteEliminado"));
 
             // Construir pool completo para el update
             var oTableCin = oView.byId("idSlotTableCintas");
@@ -835,13 +1293,18 @@ sap.ui.define([
             var aSlotsAlm = (oTableAlm && oTableAlm.getModel()) ? (oTableAlm.getModel().getProperty("/ITEMS") || []) : [];
             var aAllSlots = [].concat(aSlotsCin, aSlotsAlm);
 
+            // Re-sincronizar ambos modelos (NO_CARGA de cada slot se preserva sin renumerar)
+            if (oTableCin && oTableCin.getModel()) { oTableCin.getModel().refresh(true); }
+            if (oTableAlm && oTableAlm.getModel()) { oTableAlm.getModel().refresh(true); }
+            self._updateOrderSummaryScannedQty(aSlotsCin, aSlotsAlm);
+
             var slotTipo = oView.byId("slotType").getValue();
             var iQtyCin = parseInt(oView.byId("slotQty_cintas").getValue() || "0", 10);
             var iQtyAlm = parseInt(oView.byId("slotQty_alambre").getValue() || "0", 10);
             var aEdited = [
                 { attribute: "SLOTTIPO", value: slotTipo },
-                { attribute: "SLOTQTY_CIN", value: iQtyCin.toString() },
-                { attribute: "SLOTQTY_ALM", value: iQtyAlm.toString() }
+                { attribute: "SLOTQTY_CINTAS_EF02", value: iQtyCin.toString() },
+                { attribute: "SLOTQTY_ALAMBRE_EF02", value: iQtyAlm.toString() }
             ].concat(aAllSlots.map(function (slot) { return { attribute: slot.attribute, value: slot.value }; }));
 
             var oSapApi = this.getPublicApiRestDataSourceUri();
@@ -862,8 +1325,8 @@ sap.ui.define([
                         aFinal.push({ attribute: key, value: editedMap[key] });
                     }
                 }
-                self.setCustomValuesPp({ inCustomValues: aFinal, inPlant: oPODParams.PLANT_ID, inWorkCenter: oPODParams.WORK_CENTER }, oSapApi).then(function () {
-                    sap.m.MessageToast.show(oBundle.getText("loteActualizadoAntesEliminar"));
+                self.setCustomValuesPp({ inCustomValues: aFinal, inPlant: oPODParams.PLANT_ID, inWorkCenter: oPODParams.WORK_CENTER, inMaterialLote: sMaterialLoteEliminado || "" }, oSapApi).then(function () {
+                    sap.m.MessageToast.show(oBundle.getText("loteEliminado"));
                 }).catch(function () {
                     sap.m.MessageBox.error(oBundle.getText("errorActualizar"));
                 });
@@ -905,7 +1368,7 @@ sap.ui.define([
         /**
          * Procesar slot específico validado (scan de botón de fila)
          */
-        _procesarSlotValidado: function () {
+        _procesarSlotValidado: function (sCantidadLote, sUom) {
             if (!this._slotContext) {
                 console.error("No hay contexto de slot guardado");
                 return;
@@ -959,9 +1422,12 @@ sap.ui.define([
                 return;
             }
 
-            var sNoCarga = oView.byId("noCarga").getValue() || "";
-            var sBarcodeConSecuencia = sNoCarga ? sBarcode + "!" + sNoCarga : sBarcode;
-            aSlots[iIndex].value = sBarcodeConSecuencia;
+            var sNoCargaProc = oView.byId("noCarga").getValue() || "1";
+            var sCantidadPendProc = sCantidadLote || "0.00";
+            aSlots[iIndex].value = sBarcode + "!" + (sCantidadLote || "0.00") + "!" + sNoCargaProc + "!" + sCantidadPendProc;
+            aSlots[iIndex].loteQty = sCantidadLote || "";
+            aSlots[iIndex].loteUom = sUom || "";
+            aSlots[iIndex].cantidadAsignada = sCantidadLote || "";
             oModel.setProperty("/ITEMS", aSlots);
             oModel.refresh(true);
             this._updateProgressIndicator();
@@ -978,8 +1444,8 @@ sap.ui.define([
             var iQtyAlm = parseInt(oView.byId("slotQty_alambre").getValue() || "0", 10);
             var aEdited = [
                 { attribute: "SLOTTIPO", value: slotTipo },
-                { attribute: "SLOTQTY_CIN", value: iQtyCin.toString() },
-                { attribute: "SLOTQTY_ALM", value: iQtyAlm.toString() }
+                { attribute: "SLOTQTY_CINTAS_EF02", value: iQtyCin.toString() },
+                { attribute: "SLOTQTY_ALAMBRE_EF02", value: iQtyAlm.toString() }
             ].concat(aAllSlots.map(function (slot) { return { attribute: slot.attribute, value: slot.value }; }));
 
             var oSapApi = this.getPublicApiRestDataSourceUri();
@@ -1110,13 +1576,24 @@ sap.ui.define([
             });
         },
         /**
-         * Iniciar nueva carga para la tabla activa (CINTAS o ALAMBRE).
-         * Para CINTAS: incrementa NO_CARGA y actualiza SLOTQTY_CIN.
-         * Para ALAMBRE: solo actualiza SLOTQTY_ALM (NO_CARGA no cambia).
-         * @param {number} iCantidad - Cantidad de lotes a escanear
-         * @param {string} sTabla - "CINTAS" o "ALAMBRE"
+         * Auto-inicializa la Carga 1 cuando SLOTQTY_CINTAS_EF02 es 0.
+         * Si la cantidad sugerida ya está disponible, llama _iniciarNuevaCarga directamente.
+         * Si no, activa el flag _pendingAutoInit para que lo dispare onGetOrderCustomValues.
          */
-        _iniciarNuevaCarga: function (iCantidad, sTabla) {
+        _autoInitCargaIfNeeded: function () {
+            if (this._suggestedQtyCintas && this._suggestedQtyCintas > 0) {
+                this._iniciarNuevaCarga(this._suggestedQtyCintas);
+            } else {
+                this._pendingAutoInit = true;
+            }
+        },
+
+        /**
+         * Iniciar nueva carga para CINTAS: incrementa NO_CARGA y actualiza SLOTQTY_CINTAS_EF02.
+         * El alambre persiste a través de las cargas (no se resetea).
+         * @param {number} iCantidad - Cantidad de cintas por carga
+         */
+        _iniciarNuevaCarga: function (iCantidad) {
             var oView = this.getView();
             var oBundle = oView.getModel("i18n").getResourceBundle();
             var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
@@ -1130,31 +1607,14 @@ sap.ui.define([
                 var aCurrentCV = self._getValidatedCustomValues(oCurrentRes, oBundle);
                 if (!aCurrentCV) { oView.byId("idPluginPanel").setBusy(false); return; }
 
-                var aEdited = [];
+                // Incrementar NO_CARGA
+                var oNoCargaCV = aCurrentCV.find(function (cv) { return cv.attribute === "NO_CARGA"; });
+                var iNuevaCarga = (oNoCargaCV ? (parseInt(oNoCargaCV.value || "0", 10) || 0) : 0) + 1;
 
-                if (sTabla === "CINTAS") {
-                    // Incrementar NO_CARGA y actualizar SLOTQTY_CIN
-                    var oNoCargaCV = aCurrentCV.find(function (cv) { return cv.attribute === "NO_CARGA"; });
-                    var iNoCargaActual = oNoCargaCV ? (parseInt(oNoCargaCV.value || "0", 10) || 0) : 0;
-                    var iNuevaCarga = iNoCargaActual + 1;
-                    aEdited.push({ attribute: "NO_CARGA", value: iNuevaCarga.toString() });
-                    aEdited.push({ attribute: "SLOTQTY_CIN", value: iCantidad.toString() });
-                    // Vaciar slots existentes de cintas
-                    var iQtyCinActual = parseInt((aCurrentCV.find(function (cv) { return cv.attribute === "SLOTQTY_CIN"; }) || { value: "0" }).value, 10) || 0;
-                    var iMaxCin = Math.max(iQtyCinActual, iCantidad);
-                    for (var c = 1; c <= iMaxCin; c++) {
-                        aEdited.push({ attribute: "SLOT" + c.toString().padStart(3, "0"), value: "" });
-                    }
-                } else {
-                    // Solo actualizar SLOTQTY_ALM y vaciar slots de alambre
-                    var iQtyCinRef = parseInt((aCurrentCV.find(function (cv) { return cv.attribute === "SLOTQTY_CIN"; }) || { value: "0" }).value, 10) || 0;
-                    var iQtyAlmActual = parseInt((aCurrentCV.find(function (cv) { return cv.attribute === "SLOTQTY_ALM"; }) || { value: "0" }).value, 10) || 0;
-                    aEdited.push({ attribute: "SLOTQTY_ALM", value: iCantidad.toString() });
-                    var iMaxAlm = Math.max(iQtyAlmActual, iCantidad);
-                    for (var a = iQtyCinRef + 1; a <= iQtyCinRef + iMaxAlm; a++) {
-                        aEdited.push({ attribute: "SLOT" + a.toString().padStart(3, "0"), value: "" });
-                    }
-                }
+                // Solo incrementar NO_CARGA; los slots previos se preservan entre cargas
+                var aEdited = [
+                    { attribute: "NO_CARGA", value: iNuevaCarga.toString() }
+                ];
 
                 var aEditMap = {};
                 aEdited.forEach(function (item) { aEditMap[item.attribute] = item.value; });
@@ -1169,19 +1629,10 @@ sap.ui.define([
 
                 self.setCustomValuesPp({ inCustomValues: aFinal, inPlant: oPODParams.PLANT_ID, inWorkCenter: oPODParams.WORK_CENTER }, oSapApi).then(function () {
                     oView.byId("idPluginPanel").setBusy(false);
-
-                    if (sTabla === "CINTAS") {
-                        var iNoCargaFinal = parseInt((aFinal.find(function (cv) { return cv.attribute === "NO_CARGA"; }) || { value: "1" }).value, 10) || 1;
-                        oView.byId("noCarga").setValue(iNoCargaFinal.toString());
-                        oView.byId("slotQty_cintas").setValue(iCantidad.toString());
-                    } else {
-                        oView.byId("slotQty_alambre").setValue(iCantidad.toString());
-                    }
-
-                    self._cargaActual = { noCarga: parseInt(oView.byId("noCarga").getValue(), 10), cantidad: iCantidad };
-                    sap.m.MessageToast.show(oBundle.getText("cargaInitSuccess", [oView.byId("noCarga").getValue(), iCantidad]));
-                    setTimeout(function () { self.onGetCustomValues(); }, 1000);
-
+                    oView.byId("noCarga").setValue(iNuevaCarga.toString());
+                    self._suggestedQtyCintas = iCantidad;
+                    self._cargaActual = { noCarga: iNuevaCarga, cantidad: iCantidad };
+                    sap.m.MessageToast.show(oBundle.getText("cargaInitSuccess", [iNuevaCarga.toString(), iCantidad]));
                 }).catch(function () {
                     oView.byId("idPluginPanel").setBusy(false);
                     sap.m.MessageToast.show(oBundle.getText("errorInitCarga"));
@@ -1194,37 +1645,47 @@ sap.ui.define([
 
 
         /**
-         * Actualizar indicador de progreso (contador y barra) - agrega ambas tablas
+         * Actualizar indicador de progreso basado en la carga actual de cintas.
+         * Muestra "Carga X: Y/N" donde X=NO_CARGA, Y=cintas escaneadas en esta carga, N=total por carga.
          */
         _updateProgressIndicator: function () {
             var oView = this.getView();
             var oTableCin = oView.byId("idSlotTableCintas");
-            var oTableAlm = oView.byId("idSlotTableAlambre");
             var aItemsCin = (oTableCin && oTableCin.getModel()) ? (oTableCin.getModel().getProperty("/ITEMS") || []) : [];
-            var aItemsAlm = (oTableAlm && oTableAlm.getModel()) ? (oTableAlm.getModel().getProperty("/ITEMS") || []) : [];
-
             var iQtyCin = parseInt(oView.byId("slotQty_cintas").getValue() || "0", 10);
             var iQtyAlm = parseInt(oView.byId("slotQty_alambre").getValue() || "0", 10);
-            var iTotalQty = iQtyCin + iQtyAlm;
+            var sNoCarga = oView.byId("noCarga").getValue() || "0";
 
-            var iEscCin = aItemsCin.filter(function (s) { return s.value && s.value.trim() !== ""; }).length;
-            var iEscAlm = aItemsAlm.filter(function (s) { return s.value && s.value.trim() !== ""; }).length;
-            var iEscaneados = iEscCin + iEscAlm;
+            // Contar solo los lotes de la carga actual para el indicador de progreso
+            var sNoCargaActual = oView.byId("noCarga").getValue() || "1";
+            var iEscCin = aItemsCin.filter(function (s) {
+                if (!s.value || !s.value.trim()) { return false; }
+                var p = s.value.split('!');
+                return (p[3] || "") === sNoCargaActual;
+            }).length;
 
-            // Actualizar contador de texto
+            // Usar cantidad sugerida de la orden como objetivo (permite superar sin error)
+            var iSugeridoCin = (this._suggestedQtyCintas && this._suggestedQtyCintas > 0)
+                ? this._suggestedQtyCintas : iQtyCin;
+
+            // Actualizar contador de texto: "Carga X: Y/N"
             var oProgressCounter = oView.byId("progressCounter");
             if (oProgressCounter) {
-                oProgressCounter.setText(iEscaneados + "/" + iTotalQty);
+                if (iSugeridoCin > 0) {
+                    oProgressCounter.setText("Carga " + sNoCarga + ": " + iEscCin + "/" + iSugeridoCin);
+                } else {
+                    oProgressCounter.setText(iEscCin + "/" + (iQtyCin + iQtyAlm));
+                }
             }
 
-            // Actualizar barra de progreso
+            // Actualizar barra de progreso (se permite superar el 100% visualmente)
             var oProgressBar = oView.byId("progressBar");
-            if (oProgressBar && iTotalQty > 0) {
-                var iPercent = Math.round((iEscaneados / iTotalQty) * 100);
+            if (oProgressBar && iSugeridoCin > 0) {
+                var iPercent = Math.min(100, Math.round((iEscCin / iSugeridoCin) * 100));
                 oProgressBar.setPercentValue(iPercent);
                 oProgressBar.setDisplayValue(iPercent + "%");
-                if (iEscaneados === 0) { oProgressBar.setState("None"); }
-                else if (iEscaneados < iTotalQty) { oProgressBar.setState("Warning"); }
+                if (iEscCin === 0) { oProgressBar.setState("None"); }
+                else if (iEscCin < iSugeridoCin) { oProgressBar.setState("Warning"); }
                 else { oProgressBar.setState("Success"); }
             } else if (oProgressBar) {
                 oProgressBar.setPercentValue(0);
@@ -1268,46 +1729,236 @@ sap.ui.define([
 
         /**
          * Obtener cantidad de cintas desde las características de la orden.
-         * Revisa CT_100035_500 primero; si no tiene valor, revisa CT_100038_500.
-         * El valor llega como "34 PC" → se parsea el número y se almacena en _suggestedQtyCintas.
+         * Si hay ORDENES_HIJAS, consulta todas para determinar el máximo (CT_100035_500 / CT_100038_500).
+         * Monitorea ORDEN_PADRE para detectar cambio de orden y resetear el contador de cargas.
          */
         onGetOrderCustomValues: function () {
             var oView = this.getView();
             var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
             var self = this;
 
-            var requestJSON = {
-                "plant": oPODParams.PLANT_ID,
-                "order": oPODParams.ORDER_ID
-            };
-
             var url = this.getPublicApiRestDataSourceUri() + this.ApiPaths.CHARACHTERISTICS;
-            this.ajaxGetRequest(url, requestJSON,
+            this.ajaxGetRequest(url, { plant: oPODParams.PLANT_ID, order: oPODParams.ORDER_ID },
                 function (oResponseData) {
-                    if (oResponseData && Array.isArray(oResponseData)) {
-                        // Buscar CT_100035_500 primero; si no tiene valor, usar CT_100038_500
-                        var oCustomValue =
-                            oResponseData.find(function (cv) { return cv.attribute === "CT_100035_500" && cv.value; }) ||
-                            oResponseData.find(function (cv) { return cv.attribute === "CT_100038_500" && cv.value; });
+                    var oOrder = Array.isArray(oResponseData) ? oResponseData[0] : oResponseData;
+                    var aCustomValues = (oOrder && oOrder.customValues) ? oOrder.customValues : [];
 
-                        if (oCustomValue && oCustomValue.value) {
-                            // Parsear "34 PC" → número
-                            var sRawValue = oCustomValue.value.trim();
-                            var parts = sRawValue.split(' ');
-                            var sNumeric = parts[0] || "0";
-                            oView.byId("slotQtySuggest").setValue(sRawValue);
-                            self._suggestedQtyCintas = parseInt(sNumeric, 10) || 0;
+                    // Detectar cambio de ORDEN_PADRE → reset contador de cargas
+                    var oOrdenPadreCv = aCustomValues.find(function (cv) { return cv.attribute === "ORDEN_PADRE"; });
+                    var sNuevaOrdenPadre = (oOrdenPadreCv && oOrdenPadreCv.value) ? oOrdenPadreCv.value.trim() : oPODParams.ORDER_ID;
+                    if (self._sOrdenPadre && self._sOrdenPadre !== sNuevaOrdenPadre) {
+                        self._resetLoadCounter();
+                    }
+                    self._sOrdenPadre = sNuevaOrdenPadre;
+
+                    // Recopilar todas las órdenes a consultar: actual + hijas
+                    var aOrdenesAConsultar = [oPODParams.ORDER_ID];
+                    var oOrdenesHijasCv = aCustomValues.find(function (cv) { return cv.attribute === "ORDENES_HIJAS"; });
+                    if (oOrdenesHijasCv && oOrdenesHijasCv.value) {
+                        var aHijas = oOrdenesHijasCv.value.split(',')
+                            .map(function (s) {
+                                // Normalizar al mismo formato que oPODParams.ORDER_ID:
+                                // quitar ceros iniciales para que coincida con el formato corto de la API.
+                                var sTrimmed = s.trim();
+                                return sTrimmed ? String(parseInt(sTrimmed, 10)) : "";
+                            })
+                            .filter(Boolean);
+                        aOrdenesAConsultar = aOrdenesAConsultar.concat(aHijas);
+                    }
+
+                    // Consultar todas las órdenes y obtener la cantidad máxima de cintas
+                    self._getMaxCintasFromOrders(oPODParams.PLANT_ID, aOrdenesAConsultar, function (iMaxCintas, sRawValue) {
+                        if (iMaxCintas > 0) {
+                            oView.byId("slotQtySuggest").setValue(sRawValue || String(iMaxCintas));
+                            self._suggestedQtyCintas = iMaxCintas;
+                            // Disparar auto-init si onGetCustomValues ya encontró SLOTQTY_CINTAS_EF02 = 0
+                            if (self._pendingAutoInit) {
+                                self._pendingAutoInit = false;
+                                self._iniciarNuevaCarga(iMaxCintas);
+                            }
                         } else {
                             oView.byId("slotQtySuggest").setValue("");
                             self._suggestedQtyCintas = 0;
                         }
-                    }
+                    });
                 },
                 function (oError, sHttpErrorMessage) {
-                    var err = oError || sHttpErrorMessage;
-                    sap.m.MessageToast.show(err);
+                    sap.m.MessageToast.show(oError || sHttpErrorMessage);
                 }
             );
+        },
+
+        /**
+         * Consulta múltiples órdenes y retorna la cantidad máxima de cintas encontrada
+         * en CT_100035_500 o CT_100038_500.
+         * @param {string} sPlant - Planta
+         * @param {string[]} aOrderIds - IDs de órdenes a consultar
+         * @param {function} fCallback - Callback(iMaxCintas, sRawValue)
+         */
+        _getMaxCintasFromOrders: function (sPlant, aOrderIds, fCallback) {
+            var self = this;
+            var oSapApi = this.getPublicApiRestDataSourceUri();
+            var iMaxCintas = 0;
+            var sMaxRawValue = "";
+            var iRemaining = aOrderIds.length;
+            if (!iRemaining) { fCallback(0, ""); return; }
+
+            aOrderIds.forEach(function (sOrder) {
+                self.ajaxGetRequest(oSapApi + self.ApiPaths.CHARACHTERISTICS, { plant: sPlant, order: sOrder },
+                    function (oResponseData) {
+                        var oOrd = Array.isArray(oResponseData) ? oResponseData[0] : oResponseData;
+                        var aCVs = (oOrd && oOrd.customValues) ? oOrd.customValues : [];
+                        var oCV = aCVs.find(function (cv) { return cv.attribute === "CT_100035_500" && cv.value; }) ||
+                                  aCVs.find(function (cv) { return cv.attribute === "CT_100038_500" && cv.value; });
+                        if (oCV && oCV.value) {
+                            var iQty = parseInt((oCV.value.trim().split(' ')[0]) || "0", 10) || 0;
+                            if (iQty > 0 && (iMaxCintas === 0 || iQty < iMaxCintas)) {
+                                iMaxCintas = iQty;
+                                sMaxRawValue = oCV.value.trim();
+                            }
+                        }
+                        if (--iRemaining === 0) { fCallback(iMaxCintas, sMaxRawValue); }
+                    },
+                    function () {
+                        if (--iRemaining === 0) { fCallback(iMaxCintas, sMaxRawValue); }
+                    }
+                );
+            });
+        },
+
+        /**
+         * Resetear el contador de cargas (NO_CARGA = 0) cuando cambia la ORDEN_PADRE.
+         */
+        _resetLoadCounter: function () {
+            var oView = this.getView();
+            var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
+            var oSapApi = this.getPublicApiRestDataSourceUri();
+            var self = this;
+            var sParams = { plant: oPODParams.PLANT_ID, workCenter: oPODParams.WORK_CENTER };
+            this.getWorkCenterCustomValues(sParams, oSapApi).then(function (oRes) {
+                if (!oRes || oRes === "Error" || !oRes.customValues) { return; }
+                var aFinal = oRes.customValues.map(function (cv) {
+                    return cv.attribute === "NO_CARGA" ? { attribute: "NO_CARGA", value: "0" } : cv;
+                });
+                self.setCustomValuesPp({ inCustomValues: aFinal, inPlant: oPODParams.PLANT_ID, inWorkCenter: oPODParams.WORK_CENTER }, oSapApi).then(function () {
+                    oView.byId("noCarga").setValue("0");
+                });
+            });
+        },
+
+        /**
+         * Refrescar la tabla de alambre desde backend (sin afectar los slots de cintas).
+         */
+        onRefreshCintas: function () {
+            this._refreshLoteQtyBothTables();
+        },
+
+        onRefreshAlambre: function () {
+            this._refreshLoteQtyBothTables();
+        },
+
+        /**
+         * Refresca loteQty y loteUom de todos los slots con valor (Cintas + Alambre)
+         * consultando getReservas por cada lote. Solo lectura, no persiste nada.
+         */
+        _refreshLoteQtyBothTables: function () {
+            var oView = this.getView();
+            var oBundle = oView.getModel("i18n").getResourceBundle();
+            var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
+            var mandante = this.getConfiguration().mandante;
+            var oSapApi = this.getPublicApiRestDataSourceUri();
+            var urlLote = oSapApi + this.ApiPaths.getReservas;
+
+            var oTableCin = oView.byId("idSlotTableCintas");
+            var oTableAlm = oView.byId("idSlotTableAlambre");
+            var oModelCin = oTableCin ? oTableCin.getModel() : null;
+            var oModelAlm = oTableAlm ? oTableAlm.getModel() : null;
+
+            var aItemsCin = (oModelCin && oModelCin.getProperty("/ITEMS")) || [];
+            var aItemsAlm = (oModelAlm && oModelAlm.getProperty("/ITEMS")) || [];
+
+            var aSlotsConValor = aItemsCin
+                .filter(function (s) { return s.value && s.value.trim() !== ""; })
+                .concat(aItemsAlm.filter(function (s) { return s.value && s.value.trim() !== ""; }));
+
+            if (aSlotsConValor.length === 0) {
+                sap.m.MessageToast.show(oBundle.getText("sinLotesParaRefrescar"));
+                return;
+            }
+
+            oView.byId("idPluginPanel").setBusy(true);
+
+            var aPromises = aSlotsConValor.map(function (slot) {
+                var parts = slot.value.split("!");
+                var sMaterial = (parts[0] || "").trim();
+                var sLote = (parts[1] || "").trim();
+
+                var inParams = {
+                    "inPlanta": oPODParams.PLANT_ID,
+                    "inLote": sLote,
+                    "inOrden": oPODParams.ORDER_ID,
+                    "inSapClient": mandante,
+                    "inMaterial": sMaterial,
+                    "inPuesto": oPODParams.WORK_CENTER
+                };
+
+                return new Promise(function (resolve) {
+                    this.ajaxPostRequest(urlLote, inParams,
+                        function (oRes) {
+                            var sNuevaQtyKg = parseFloat(oRes.outCantidadLote || 0).toFixed(2);
+                            var sPartsSlot = slot.value.split('!');
+                            slot.loteQty = this._formatLoteQty(oRes.outCantidadLote);
+                            slot.loteUom = oRes.outOUMLote || "";
+                            slot.cantidadAsignada = slot.loteQty;
+                            // Actualizar slot.value: MAT!LOTE!NUEVA_CANTIDAD!NO_CARGA!NUEVA_CANTIDAD_PENDIENTE
+                            slot.value = sPartsSlot[0] + '!' + sPartsSlot[1] + '!' + sNuevaQtyKg + '!' + (sPartsSlot[3] || "") + '!' + sNuevaQtyKg;
+                            resolve({ ok: true });
+                        }.bind(this),
+                        function () {
+                            resolve({ ok: false });
+                        }.bind(this)
+                    );
+                }.bind(this));
+            }.bind(this));
+
+            Promise.all(aPromises).then(function (aResults) {
+                oView.byId("idPluginPanel").setBusy(false);
+
+                if (oModelCin) { oModelCin.refresh(true); }
+                if (oModelAlm) { oModelAlm.refresh(true); }
+
+                var aFinalCin = (oModelCin && oModelCin.getProperty("/ITEMS")) || [];
+                var aFinalAlm = (oModelAlm && oModelAlm.getProperty("/ITEMS")) || [];
+                this._updateOrderSummaryScannedQty(aFinalCin, aFinalAlm);
+
+                // Persistir las cantidades actualizadas en los custom values del puesto
+                var aEditedRefresh = aFinalCin.concat(aFinalAlm).map(function (slot) {
+                    return { attribute: slot.attribute, value: slot.value || "" };
+                });
+                var sParamsWC = { plant: oPODParams.PLANT_ID, workCenter: oPODParams.WORK_CENTER };
+                this.getWorkCenterCustomValues(sParamsWC, oSapApi).then(function (oOriginalRes) {
+                    var aOriginal = this._getValidatedCustomValues(oOriginalRes, oBundle);
+                    if (!aOriginal) { return; }
+                    var aEditMap = {};
+                    aEditedRefresh.forEach(function (item) { aEditMap[item.attribute] = item.value; });
+                    var aFinalCV = aOriginal.map(function (item) {
+                        return { attribute: item.attribute, value: aEditMap.hasOwnProperty(item.attribute) ? aEditMap[item.attribute] : item.value };
+                    });
+                    for (var sKey in aEditMap) {
+                        if (!aFinalCV.find(function (i) { return i.attribute === sKey; })) {
+                            aFinalCV.push({ attribute: sKey, value: aEditMap[sKey] });
+                        }
+                    }
+                    this.setCustomValuesPp({ inCustomValues: aFinalCV, inPlant: oPODParams.PLANT_ID, inWorkCenter: oPODParams.WORK_CENTER }, oSapApi);
+                }.bind(this));
+
+                var iFailed = aResults.filter(function (r) { return !r.ok; }).length;
+                if (iFailed > 0) {
+                    sap.m.MessageToast.show(oBundle.getText("refreshParcial", [iFailed]));
+                } else {
+                    sap.m.MessageToast.show(oBundle.getText("refreshExitoso"));
+                }
+            }.bind(this));
         },
 
         onExit: function () {

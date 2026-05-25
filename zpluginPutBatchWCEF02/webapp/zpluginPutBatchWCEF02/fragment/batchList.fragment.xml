@@ -1,0 +1,52 @@
+<c:FragmentDefinition
+	xmlns="sap.m"
+	xmlns:c="sap.ui.core">
+
+  <Popover
+     id="batchListDialog"
+     title="{i18n>fragmentTitle}"
+     placement="Auto"
+     contentWidth="700px"
+     afterClose=".onAfterClosePopoverInventario">
+
+    <content>
+      <Table
+             id="list"
+             width="100%"
+             items="{/ITEMS}">
+        <columns>
+          <Column width="25%">
+            <Label text="{i18n>material}"/>
+          </Column>
+          <Column width="20%">
+            <Label text="{i18n>lote}"/>
+          </Column>
+          <Column width="10%">
+            <Label text="{i18n>cantidad}"/>
+          </Column>
+          <Column width="35%">
+            <Label text="{i18n>codigoEscaneo}"/>
+          </Column>
+        </columns>
+        <items>
+          <ColumnListItem>
+            <cells>
+              <Text text="{MATERIAL}"/>
+              <Text text="{LOTE}"/>
+              <Text text="{CANTIDAD}"/>
+              <Link text="{CODIGO}" press=".onCopiarCodigo"/>
+            </cells>
+          </ColumnListItem>
+        </items>
+      </Table>
+    </content>
+
+    <footer>
+      <OverflowToolbar>
+        <ToolbarSpacer/>
+        <Button text="{i18n>cancel}" press=".onCloseDialogBatchChars"/>
+      </OverflowToolbar>
+    </footer>
+
+  </Popover>
+</c:FragmentDefinition>
