@@ -27,6 +27,7 @@ sap.ui.define([
             PluginViewController.prototype.onInit.apply(this, arguments);
             this.oScanInput = this.byId("scanInput");
             this._suggestedQtyCintas = 0;
+            this._cargaTargets = {};
             this.iSecuenciaCounter = 0;
 
             // Modelo "orderSummary" para resumen de materiales de la BOM
@@ -619,6 +620,16 @@ sap.ui.define([
                 var iQtyAlm = parseInt(cvQtyAlm.value || "0", 10);
                 var iTotalSlots = iQtyCin + iQtyAlm;
 
+                // Leer objetivos por carga (CARGA_1..CARGA_5) persistidos en los CV del puesto
+                var self = this;
+                ["1", "2", "3", "4", "5"].forEach(function (sCargaN) {
+                    var oCargaCV = aCustomValues.find(function (el) { return el.attribute === "CARGA_" + sCargaN; });
+                    if (oCargaCV && oCargaCV.value) {
+                        var iCargaVal = parseInt(oCargaCV.value, 10);
+                        if (!isNaN(iCargaVal) && iCargaVal > 0) { self._cargaTargets[sCargaN] = iCargaVal; }
+                    }
+                });
+
                 // Construir mapa número → slot para posicionamiento exacto.
                 // Si el EM elimina CVs de cintas vacías, los huecos se rellenan con
                 // placeholders para que el split posicional (slice) sea siempre correcto:
@@ -647,8 +658,8 @@ sap.ui.define([
                     slot.loteUom = slot.loteUom || "";
                 });
 
-                // Repartir: primeros iQtyCin → cintas, siguientes iQtyAlm → alambre
-                var aSlotsCin = aSlotsFixed.slice(0, iQtyCin);
+                // Repartir: primeros iQtyCin → cintas (ordenadas: ocupadas primero), siguientes iQtyAlm → alambre
+                var aSlotsCin = this._sortSlotsForDisplay(aSlotsFixed.slice(0, iQtyCin));
                 var aSlotsAlm = aSlotsFixed.slice(iQtyCin, iQtyCin + iQtyAlm);
 
                 var oTableCin = oView.byId("idSlotTableCintas");
@@ -669,8 +680,16 @@ sap.ui.define([
                 this._updateProgressIndicator();
                 this._updateOrderSummaryScannedQty(aSlotsCin, aSlotsAlm);
 
-                // Auto-inicializar Carga 1 si aún no hay cintas configuradas
-                if (iQtyCin === 0) {
+                // Pre-poblar slotQtyEditable con el objetivo confirmado de la carga actual
+                var iCurrentNoCargaNum = parseInt(noCargaSlot.value || "1", 10) || 1;
+                var iCurrentTarget = this._cargaTargets[iCurrentNoCargaNum.toString()];
+                if (iCurrentTarget) {
+                    oView.byId("slotQtyEditable").setValue(iCurrentTarget.toString());
+                }
+
+                // Auto-inicializar Carga 1 si NO_CARGA es 0/nulo (primera configuración del puesto)
+                var iNoCargaActual = parseInt(noCargaSlot.value || "0", 10);
+                if (iNoCargaActual <= 0) {
                     this._autoInitCargaIfNeeded();
                 }
             }.bind(this));
@@ -747,8 +766,8 @@ sap.ui.define([
                     }
                 });
 
-                // Repartir entre tablas
-                var aSlotsCin = aSlotsFixed.slice(0, iQtyCin);
+                // Repartir entre tablas (cintas ordenadas: ocupadas primero por número de carga, vacías al final)
+                var aSlotsCin = this._sortSlotsForDisplay(aSlotsFixed.slice(0, iQtyCin));
                 var aSlotsAlm = aSlotsFixed.slice(iQtyCin, iQtyCin + iQtyAlm);
 
                 if (oTableCin) { oTableCin.setModel(new sap.ui.model.json.JSONModel({ ITEMS: aSlotsCin })); }
@@ -789,6 +808,29 @@ sap.ui.define([
                     { title: oBundle.getText("sinCantidadSugeridaTitle") }
                 );
                 return;
+            }
+
+            // Validar que la carga actual esté completamente escaneada antes de iniciar la siguiente
+            var sNoCargaActual = oView.byId("noCarga").getValue() || "0";
+            var iNoCargaActual = parseInt(sNoCargaActual, 10) || 0;
+            if (iNoCargaActual > 0) {
+                var oTableCin = oView.byId("idSlotTableCintas");
+                var aItemsCin = (oTableCin && oTableCin.getModel()) ? (oTableCin.getModel().getProperty("/ITEMS") || []) : [];
+                var iEscActual = 0;
+                aItemsCin.forEach(function (s) {
+                    if (!s.value || !s.value.trim()) { return; }
+                    var sCargaSlot = s.value.split("!")[3] || "1";
+                    if (sCargaSlot === sNoCargaActual) { iEscActual++; }
+                });
+                var iTargetActual = this._cargaTargets[sNoCargaActual]
+                    ? this._cargaTargets[sNoCargaActual]
+                    : this._suggestedQtyCintas;
+                if (iTargetActual > 0 && iEscActual < iTargetActual) {
+                    sap.m.MessageBox.warning(
+                        oBundle.getText("cargaActualIncompleta", [sNoCargaActual, iEscActual, iTargetActual])
+                    );
+                    return;
+                }
             }
 
             this._iniciarNuevaCarga(this._suggestedQtyCintas);
@@ -1580,6 +1622,82 @@ sap.ui.define([
          * Si la cantidad sugerida ya está disponible, llama _iniciarNuevaCarga directamente.
          * Si no, activa el flag _pendingAutoInit para que lo dispare onGetOrderCustomValues.
          */
+        /**
+         * Confirma el objetivo de cintas para la carga actual y lo persiste en el CV CARGA_N del puesto.
+         * Lee el valor de slotQtyEditable (editable por el operador), valida y escribe en CARGA_N.
+         * El compañero de EM/consumos puede consultar CARGA_1..CARGA_5 para conocer la cantidad exacta por carga.
+         */
+        onConfirmSuggestedQty: function () {
+            var oView = this.getView();
+            var oBundle = oView.getModel("i18n").getResourceBundle();
+            var sVal = oView.byId("slotQtyEditable").getValue();
+            var nNew = parseInt(sVal, 10);
+            if (isNaN(nNew) || nNew <= 0) {
+                sap.m.MessageToast.show(oBundle.getText("cantidadInvalida"));
+                return;
+            }
+            var sNoCarga = oView.byId("noCarga").getValue() || "1";
+            var sCargaAttr = "CARGA_" + sNoCarga;
+            var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
+            var oSapApi = this.getPublicApiRestDataSourceUri();
+            var self = this;
+
+            oView.byId("idPluginPanel").setBusy(true);
+            var sParams = { plant: oPODParams.PLANT_ID, workCenter: oPODParams.WORK_CENTER };
+
+            this.getWorkCenterCustomValues(sParams, oSapApi).then(function (oOriginalRes) {
+                var aOriginal = self._getValidatedCustomValues(oOriginalRes, oBundle);
+                if (!aOriginal) { oView.byId("idPluginPanel").setBusy(false); return; }
+
+                // Merge: actualizar solo CARGA_N con el objetivo confirmado por el operador
+                var editedMap = {};
+                editedMap[sCargaAttr] = nNew.toString();
+                var aFinal = aOriginal.map(function (item) {
+                    return { attribute: item.attribute, value: editedMap.hasOwnProperty(item.attribute) ? editedMap[item.attribute] : item.value };
+                });
+                if (!aFinal.find(function (i) { return i.attribute === sCargaAttr; })) {
+                    aFinal.push({ attribute: sCargaAttr, value: nNew.toString() });
+                }
+
+                self.setCustomValuesPp({
+                    inCustomValues: aFinal,
+                    inPlant: oPODParams.PLANT_ID,
+                    inWorkCenter: oPODParams.WORK_CENTER
+                }, oSapApi).then(function () {
+                    oView.byId("idPluginPanel").setBusy(false);
+                    self._suggestedQtyCintas = nNew;
+                    self._cargaTargets[sNoCarga] = nNew;
+                    self._updateProgressIndicator();
+                    sap.m.MessageToast.show(oBundle.getText("objetivoCargaActualizado", [sNoCarga, nNew]));
+                }).catch(function () {
+                    oView.byId("idPluginPanel").setBusy(false);
+                    sap.m.MessageToast.show(oBundle.getText("errorObtenerDatos"));
+                });
+            }).catch(function () {
+                oView.byId("idPluginPanel").setBusy(false);
+                sap.m.MessageToast.show(oBundle.getText("errorObtenerDatos"));
+            });
+        },
+
+        /**
+         * Ordena un array de slots para visualización: slots ocupados primero (agrupados
+         * por número de carga ascendente, luego por atributo SLOT), slots vacíos al final.
+         * No modifica los datos ni el backend; solo es visual.
+         * @param {Array} aSlots - Array de objetos slot del modelo
+         * @returns {Array} Array reordenado
+         */
+        _sortSlotsForDisplay: function (aSlots) {
+            var aOccupied = aSlots.filter(function (s) { return s.value && s.value.trim(); });
+            var aEmpty    = aSlots.filter(function (s) { return !s.value || !s.value.trim(); });
+            aOccupied.sort(function (a, b) {
+                var nA = parseInt((a.value.split("!")[3] || "0"), 10);
+                var nB = parseInt((b.value.split("!")[3] || "0"), 10);
+                if (nA !== nB) { return nA - nB; }
+                return a.attribute.localeCompare(b.attribute);
+            });
+            return aOccupied.concat(aEmpty);
+        },
+
         _autoInitCargaIfNeeded: function () {
             if (this._suggestedQtyCintas && this._suggestedQtyCintas > 0) {
                 this._iniciarNuevaCarga(this._suggestedQtyCintas);
@@ -1611,9 +1729,10 @@ sap.ui.define([
                 var oNoCargaCV = aCurrentCV.find(function (cv) { return cv.attribute === "NO_CARGA"; });
                 var iNuevaCarga = (oNoCargaCV ? (parseInt(oNoCargaCV.value || "0", 10) || 0) : 0) + 1;
 
-                // Solo incrementar NO_CARGA; los slots previos se preservan entre cargas
+                // Incrementar NO_CARGA y guardar objetivo inicial de la nueva carga automáticamente
                 var aEdited = [
-                    { attribute: "NO_CARGA", value: iNuevaCarga.toString() }
+                    { attribute: "NO_CARGA", value: iNuevaCarga.toString() },
+                    { attribute: "CARGA_" + iNuevaCarga.toString(), value: iCantidad.toString() }
                 ];
 
                 var aEditMap = {};
@@ -1631,7 +1750,14 @@ sap.ui.define([
                     oView.byId("idPluginPanel").setBusy(false);
                     oView.byId("noCarga").setValue(iNuevaCarga.toString());
                     self._suggestedQtyCintas = iCantidad;
+                    // Registrar objetivo de esta carga (guardado automáticamente al iniciar)
+                    self._cargaTargets[iNuevaCarga.toString()] = iCantidad;
+                    // Pre-poblar slotQtyEditable con el objetivo de la nueva carga
+                    // (usa el confirmado previamente si existe, o el sugerido por la orden)
+                    var iEditableTarget = self._cargaTargets[iNuevaCarga.toString()] || iCantidad;
+                    oView.byId("slotQtyEditable").setValue(iEditableTarget.toString());
                     self._cargaActual = { noCarga: iNuevaCarga, cantidad: iCantidad };
+                    self._updateProgressIndicator();
                     sap.m.MessageToast.show(oBundle.getText("cargaInitSuccess", [iNuevaCarga.toString(), iCantidad]));
                 }).catch(function () {
                     oView.byId("idPluginPanel").setBusy(false);
@@ -1645,8 +1771,10 @@ sap.ui.define([
 
 
         /**
-         * Actualizar indicador de progreso basado en la carga actual de cintas.
-         * Muestra "Carga X: Y/N" donde X=NO_CARGA, Y=cintas escaneadas en esta carga, N=total por carga.
+         * Actualizar indicador de progreso con un contador por carga (hasta 5 cargas).
+         * Muestra "C1: Y/N", "C2: Y/N", ... para cada carga que exista.
+         * La barra de progreso refleja la carga actual.
+         * Los objetivos por carga se leen de this._cargaTargets.
          */
         _updateProgressIndicator: function () {
             var oView = this.getView();
@@ -1654,38 +1782,49 @@ sap.ui.define([
             var aItemsCin = (oTableCin && oTableCin.getModel()) ? (oTableCin.getModel().getProperty("/ITEMS") || []) : [];
             var iQtyCin = parseInt(oView.byId("slotQty_cintas").getValue() || "0", 10);
             var iQtyAlm = parseInt(oView.byId("slotQty_alambre").getValue() || "0", 10);
-            var sNoCarga = oView.byId("noCarga").getValue() || "0";
-
-            // Contar solo los lotes de la carga actual para el indicador de progreso
             var sNoCargaActual = oView.byId("noCarga").getValue() || "1";
-            var iEscCin = aItemsCin.filter(function (s) {
-                if (!s.value || !s.value.trim()) { return false; }
-                var p = s.value.split('!');
-                return (p[3] || "") === sNoCargaActual;
-            }).length;
+            var iNoCargaActual = parseInt(sNoCargaActual, 10) || 1;
 
-            // Usar cantidad sugerida de la orden como objetivo (permite superar sin error)
-            var iSugeridoCin = (this._suggestedQtyCintas && this._suggestedQtyCintas > 0)
-                ? this._suggestedQtyCintas : iQtyCin;
+            // Contar slots ocupados de cintas agrupados por número de carga (parts[3])
+            var oCargaCount = {};
+            aItemsCin.forEach(function (s) {
+                if (!s.value || !s.value.trim()) { return; }
+                var sCargaSlot = s.value.split("!")[3] || "1";
+                oCargaCount[sCargaSlot] = (oCargaCount[sCargaSlot] || 0) + 1;
+            });
 
-            // Actualizar contador de texto: "Carga X: Y/N"
-            var oProgressCounter = oView.byId("progressCounter");
-            if (oProgressCounter) {
-                if (iSugeridoCin > 0) {
-                    oProgressCounter.setText("Carga " + sNoCarga + ": " + iEscCin + "/" + iSugeridoCin);
+            // Actualizar contadores individuales C1..C5
+            var aCounterIds = ["progressCounter", "progressCounter2", "progressCounter3", "progressCounter4", "progressCounter5"];
+            for (var n = 1; n <= 5; n++) {
+                var oCounter = oView.byId(aCounterIds[n - 1]);
+                if (!oCounter) { continue; }
+                if (n > iNoCargaActual) {
+                    oCounter.setVisible(false);
+                    oCounter.setText("");
                 } else {
-                    oProgressCounter.setText(iEscCin + "/" + (iQtyCin + iQtyAlm));
+                    var sN = n.toString();
+                    var iEscN = oCargaCount[sN] || 0;
+                    var iTargetN = this._cargaTargets[sN]
+                        ? this._cargaTargets[sN]
+                        : ((this._suggestedQtyCintas && this._suggestedQtyCintas > 0) ? this._suggestedQtyCintas : iQtyCin);
+                    var sCheck = (n < iNoCargaActual && iTargetN > 0 && iEscN >= iTargetN) ? " ✓" : "";
+                    oCounter.setText("C" + sN + ": " + iEscN + "/" + (iTargetN || "?") + sCheck);
+                    oCounter.setVisible(true);
                 }
             }
 
-            // Actualizar barra de progreso (se permite superar el 100% visualmente)
+            // Barra de progreso → refleja únicamente la carga actual
+            var iEscActual = oCargaCount[sNoCargaActual] || 0;
+            var iSugeridoActual = this._cargaTargets[sNoCargaActual]
+                ? this._cargaTargets[sNoCargaActual]
+                : ((this._suggestedQtyCintas && this._suggestedQtyCintas > 0) ? this._suggestedQtyCintas : iQtyCin);
             var oProgressBar = oView.byId("progressBar");
-            if (oProgressBar && iSugeridoCin > 0) {
-                var iPercent = Math.min(100, Math.round((iEscCin / iSugeridoCin) * 100));
+            if (oProgressBar && iSugeridoActual > 0) {
+                var iPercent = Math.min(100, Math.round((iEscActual / iSugeridoActual) * 100));
                 oProgressBar.setPercentValue(iPercent);
                 oProgressBar.setDisplayValue(iPercent + "%");
-                if (iEscCin === 0) { oProgressBar.setState("None"); }
-                else if (iEscCin < iSugeridoCin) { oProgressBar.setState("Warning"); }
+                if (iEscActual === 0) { oProgressBar.setState("None"); }
+                else if (iEscActual < iSugeridoActual) { oProgressBar.setState("Warning"); }
                 else { oProgressBar.setState("Success"); }
             } else if (oProgressBar) {
                 oProgressBar.setPercentValue(0);
@@ -1771,7 +1910,18 @@ sap.ui.define([
                         if (iMaxCintas > 0) {
                             oView.byId("slotQtySuggest").setValue(sRawValue || String(iMaxCintas));
                             self._suggestedQtyCintas = iMaxCintas;
-                            // Disparar auto-init si onGetCustomValues ya encontró SLOTQTY_CINTAS_EF02 = 0
+                            // Inicializar objetivo de la carga actual si no fue confirmado antes
+                            var sNoCargaInit = oView.byId("noCarga").getValue() || "1";
+                            if (!self._cargaTargets[sNoCargaInit]) {
+                                self._cargaTargets[sNoCargaInit] = iMaxCintas;
+                            }
+                            // Pre-poblar slotQtyEditable si aún no tiene un valor confirmado
+                            var oEditableInput = oView.byId("slotQtyEditable");
+                            if (oEditableInput && !oEditableInput.getValue()) {
+                                oEditableInput.setValue(String(self._cargaTargets[sNoCargaInit] || iMaxCintas));
+                            }
+                            self._updateProgressIndicator();
+                            // Disparar auto-init si NO_CARGA era 0 cuando onGetCustomValues corrió
                             if (self._pendingAutoInit) {
                                 self._pendingAutoInit = false;
                                 self._iniciarNuevaCarga(iMaxCintas);

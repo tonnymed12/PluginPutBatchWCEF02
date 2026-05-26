@@ -105,7 +105,12 @@ width="100%" height="100%">
                     <Label text="{i18n>quantity}" class="sapUiSmallMarginBeginEnd sapUiSmallMarginTop" visible="false" />
                     <Input id="slotQty" enabled="false" width="auto" class="sapUiSmallMarginBottom sapUiSmallMarginBeginEnd sapUiSmallMarginTop" visible="false"/>
                     <Label text="{i18n>SuggestedQuantity}" class="sapUiSmallMarginBeginEnd sapUiSmallMarginBegin sapUiSmallMarginTop"/>
-                    <Input id="slotQtySuggest" enabled="false" width="auto" class="sapUiSmallMarginBottom sapUiSmallMarginTop sapUiSmallMarginBegin"/>
+                    <Input id="slotQtySuggest" enabled="false" width="80px" class="sapUiSmallMarginBottom sapUiSmallMarginTop sapUiSmallMarginBegin"/>
+                    <Label text="{i18n>cantidadParaCarga}" class="sapUiSmallMarginBeginEnd sapUiSmallMarginBegin sapUiSmallMarginTop"/>
+                    <Input id="slotQtyEditable" enabled="true" width="80px" type="Number" class="sapUiSmallMarginBottom sapUiSmallMarginTop sapUiSmallMarginBegin"/>
+                    <Button id="confirmSuggestedQty" text="{i18n>confirmar}" press=".onConfirmSuggestedQty"
+                        icon="sap-icon://accept" type="Emphasized"
+                        class="sapUiSmallMarginBeginEnd sapUiSmallMarginTop" width="auto"/>
 
                     <Button id="inicioEscaneo" text="{i18n>inicioCarga}" press=".onInicioEscaneo" 
                     width="auto" class="sapUiSmallMarginBeginEnd sapUiSmallMarginTop" icon="sap-icon://cart-4" type="Accept"/>
@@ -125,7 +130,11 @@ width="100%" height="100%">
             <VBox width="auto" class="sapUiSmallMarginBottom sapUiSmallMarginBeginEnd">
                 <HBox width="auto" alignItems="Center" class="sapUiSmallMarginBottom">
                     <Text id="progressLabel" text="{i18n>progressLabel}" class="sapUiMediumMarginEnd" />
-                    <Text id="progressCounter" text="0/0" class="sapUiLargeMarginBeginEnd" />
+                    <Text id="progressCounter"  text="" visible="false" class="sapUiSmallMarginEnd" />
+                    <Text id="progressCounter2" text="" visible="false" class="sapUiSmallMarginEnd" />
+                    <Text id="progressCounter3" text="" visible="false" class="sapUiSmallMarginEnd" />
+                    <Text id="progressCounter4" text="" visible="false" class="sapUiSmallMarginEnd" />
+                    <Text id="progressCounter5" text="" visible="false" class="sapUiSmallMarginEnd" />
                 </HBox>
                 <ProgressIndicator 
                     id="progressBar"
