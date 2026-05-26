@@ -127,7 +127,7 @@ width="100%" height="100%">
             </HBox>
 
             <!-- Indicador de Progreso de Carga -->
-            <VBox width="auto" class="sapUiSmallMarginBottom sapUiSmallMarginBeginEnd">
+            <VBox id="progressContainer" width="auto" class="sapUiSmallMarginBottom sapUiSmallMarginBeginEnd">
                 <HBox width="auto" alignItems="Center" class="sapUiSmallMarginBottom">
                     <Text id="progressLabel" text="{i18n>progressLabel}" class="sapUiMediumMarginEnd" />
                     <Text id="progressCounter"  text="" visible="false" class="sapUiSmallMarginEnd" />

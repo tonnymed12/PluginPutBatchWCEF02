@@ -76,6 +76,7 @@ sap.ui.define([
             var bCintas = sKey === "CINTAS";
             oView.byId("containerCintas").setVisible(bCintas);
             oView.byId("containerAlambre").setVisible(!bCintas);
+            oView.byId("progressContainer").setVisible(bCintas);
             // Sync slotQty display for active table
             var sQty = bCintas
                 ? oView.byId("slotQty_cintas").getValue()
@@ -172,8 +173,8 @@ sap.ui.define([
                 var slotTipo = oView.byId("slotType").getValue();
                 var aEdited = [
                     { attribute: "SLOTTIPO",             value: slotTipo },
-                    { attribute: "SLOTQTY_CINTAS_EF02",  value: oRefresh.iQtyCin.toString() },
-                    { attribute: "SLOTQTY_ALAMBRE_EF02", value: oRefresh.iQtyAlm.toString() }
+                    { attribute: "CINTAS_EF02_SLOTQTY",  value: oRefresh.iQtyCin.toString() },
+                    { attribute: "ALAMBRE_EF02_SLOTQTY", value: oRefresh.iQtyAlm.toString() }
                 ].concat(aAllSlots.map(function (slot) { return { attribute: slot.attribute, value: slot.value }; }));
 
                 var oSapApi = self.getPublicApiRestDataSourceUri();
@@ -614,8 +615,8 @@ sap.ui.define([
                 var aCustomValues = oData.customValues;
                 var noCargaSlot = aCustomValues.find(function (el) { return el.attribute === "NO_CARGA"; }) || { value: "0" };
                 var tipoSlot = aCustomValues.find(function (el) { return el.attribute === "SLOTTIPO"; }) || { value: "" };
-                var cvQtyCin = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_CINTAS_EF02"; }) || { value: "0" };
-                var cvQtyAlm = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_ALAMBRE_EF02"; }) || { value: "0" };
+                var cvQtyCin = aCustomValues.find(function (el) { return el.attribute === "CINTAS_EF02_SLOTQTY"; }) || { value: "0" };
+                var cvQtyAlm = aCustomValues.find(function (el) { return el.attribute === "ALAMBRE_EF02_SLOTQTY"; }) || { value: "0" };
                 var iQtyCin = parseInt(cvQtyCin.value || "0", 10);
                 var iQtyAlm = parseInt(cvQtyAlm.value || "0", 10);
                 var iTotalSlots = iQtyCin + iQtyAlm;
@@ -731,8 +732,8 @@ sap.ui.define([
                 }
 
                 var aCustomValues = oData.customValues;
-                var cvQtyCin = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_CINTAS_EF02"; }) || { value: "0" };
-                var cvQtyAlm = aCustomValues.find(function (el) { return el.attribute === "SLOTQTY_ALAMBRE_EF02"; }) || { value: "0" };
+                var cvQtyCin = aCustomValues.find(function (el) { return el.attribute === "CINTAS_EF02_SLOTQTY"; }) || { value: "0" };
+                var cvQtyAlm = aCustomValues.find(function (el) { return el.attribute === "ALAMBRE_EF02_SLOTQTY"; }) || { value: "0" };
                 var iQtyCin = parseInt(cvQtyCin.value || "0", 10);
                 var iQtyAlm = parseInt(cvQtyAlm.value || "0", 10);
                 var iTotalSlots = iQtyCin + iQtyAlm;
@@ -787,7 +788,7 @@ sap.ui.define([
         },
         /**
          * Botón "Iniciar Carga": solo aplica para CINTAS.
-         * Usa la cantidad de SLOTQTY_CINTAS_EF02, valida que la carga actual esté completa,
+         * Usa la cantidad de CINTAS_EF02_SLOTQTY, valida que la carga actual esté completa,
          * incrementa NO_CARGA y vacía los slots de cintas.
          * El alambre persiste a través de las cargas.
          * @returns {void}
@@ -1226,8 +1227,8 @@ sap.ui.define([
                 var slotTipo = oView.byId("slotType").getValue();
                 var aEdited = [
                     { attribute: "SLOTTIPO", value: slotTipo },
-                    { attribute: "SLOTQTY_CINTAS_EF02", value: oRefresh.iQtyCin.toString() },
-                    { attribute: "SLOTQTY_ALAMBRE_EF02", value: oRefresh.iQtyAlm.toString() }
+                    { attribute: "CINTAS_EF02_SLOTQTY", value: oRefresh.iQtyCin.toString() },
+                    { attribute: "ALAMBRE_EF02_SLOTQTY", value: oRefresh.iQtyAlm.toString() }
                 ].concat(oRefresh.allSlots.map(function (slot) {
                     return { attribute: slot.attribute, value: slot.value };
                 }));
@@ -1345,8 +1346,8 @@ sap.ui.define([
             var iQtyAlm = parseInt(oView.byId("slotQty_alambre").getValue() || "0", 10);
             var aEdited = [
                 { attribute: "SLOTTIPO", value: slotTipo },
-                { attribute: "SLOTQTY_CINTAS_EF02", value: iQtyCin.toString() },
-                { attribute: "SLOTQTY_ALAMBRE_EF02", value: iQtyAlm.toString() }
+                { attribute: "CINTAS_EF02_SLOTQTY", value: iQtyCin.toString() },
+                { attribute: "ALAMBRE_EF02_SLOTQTY", value: iQtyAlm.toString() }
             ].concat(aAllSlots.map(function (slot) { return { attribute: slot.attribute, value: slot.value }; }));
 
             var oSapApi = this.getPublicApiRestDataSourceUri();
@@ -1486,8 +1487,8 @@ sap.ui.define([
             var iQtyAlm = parseInt(oView.byId("slotQty_alambre").getValue() || "0", 10);
             var aEdited = [
                 { attribute: "SLOTTIPO", value: slotTipo },
-                { attribute: "SLOTQTY_CINTAS_EF02", value: iQtyCin.toString() },
-                { attribute: "SLOTQTY_ALAMBRE_EF02", value: iQtyAlm.toString() }
+                { attribute: "CINTAS_EF02_SLOTQTY", value: iQtyCin.toString() },
+                { attribute: "ALAMBRE_EF02_SLOTQTY", value: iQtyAlm.toString() }
             ].concat(aAllSlots.map(function (slot) { return { attribute: slot.attribute, value: slot.value }; }));
 
             var oSapApi = this.getPublicApiRestDataSourceUri();
@@ -1618,7 +1619,7 @@ sap.ui.define([
             });
         },
         /**
-         * Auto-inicializa la Carga 1 cuando SLOTQTY_CINTAS_EF02 es 0.
+         * Auto-inicializa la Carga 1 cuando CINTAS_EF02_SLOTQTY es 0.
          * Si la cantidad sugerida ya está disponible, llama _iniciarNuevaCarga directamente.
          * Si no, activa el flag _pendingAutoInit para que lo dispare onGetOrderCustomValues.
          */
@@ -1707,7 +1708,7 @@ sap.ui.define([
         },
 
         /**
-         * Iniciar nueva carga para CINTAS: incrementa NO_CARGA y actualiza SLOTQTY_CINTAS_EF02.
+         * Iniciar nueva carga para CINTAS: incrementa NO_CARGA y actualiza CINTAS_EF02_SLOTQTY.
          * El alambre persiste a través de las cargas (no se resetea).
          * @param {number} iCantidad - Cantidad de cintas por carga
          */
