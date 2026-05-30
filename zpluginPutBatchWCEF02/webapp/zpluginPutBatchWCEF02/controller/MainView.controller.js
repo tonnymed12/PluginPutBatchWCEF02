@@ -254,8 +254,11 @@ sap.ui.define([
             var mGroups = {};
             var aOrder = [];
             aComponents.forEach(function (oComp) {
-                var sKey = oComp.erpSequence !== undefined && oComp.erpSequence !== null
-                    ? String(oComp.erpSequence) : String(oComp.sequence);
+                // Agrupar por material para sumar totalQuantity de todos los componentes del mismo material
+                var sKey = (oComp.material && oComp.material.material)
+                    ? String(oComp.material.material)
+                    : (oComp.erpSequence !== undefined && oComp.erpSequence !== null
+                        ? String(oComp.erpSequence) : String(oComp.sequence));
                 if (!mGroups[sKey]) {
                     mGroups[sKey] = {
                         erpSequence: oComp.erpSequence, sequence: oComp.sequence,
@@ -264,6 +267,10 @@ sap.ui.define([
                         quantity: 0, totalQuantity: 0
                     };
                     aOrder.push(sKey);
+                }
+                // Mantener la secuencia mínima del grupo
+                if (oComp.sequence < mGroups[sKey].sequence) {
+                    mGroups[sKey].sequence = oComp.sequence;
                 }
                 mGroups[sKey].quantity += Number(oComp.quantity || 0);
                 mGroups[sKey].totalQuantity += Number(oComp.totalQuantity || 0);
@@ -296,6 +303,13 @@ sap.ui.define([
 
                     var aGrouped = this.summarizeByErpSequence(aNormalComponents);
                     aGrouped.sort(function (a, b) { return (a.erpSequence || 0) - (b.erpSequence || 0); });
+
+                    // Guardar componentes KG con lotes individuales asignados en BOM para el fragmento
+                    this._aBomComponentesKg = aNormalComponents.filter(function (oComp) {
+                        return (oComp.unitOfMeasure || "").toUpperCase() === "KG"
+                            && oComp.batchNumber && oComp.batchNumber.trim() !== "";
+                    });
+
                     var oOrderSummaryModel = this.getView().getModel("orderSummary");
 
                     // CINTAS principal: UoM "KG" (Cinta RC = peso en kg).
@@ -449,6 +463,50 @@ sap.ui.define([
                 return;
             }
 
+            // CINTAS (KG): mostrar lotes directamente del BOM si hay lotes asignados
+            if (sGrupo === "CINTAS" && this._aBomComponentesKg && this._aBomComponentesKg.length > 0) {
+                // Obtener lotes ya escaneados en la tabla de cintas
+                var oTableCinFrag = oView.byId("idSlotTableCintas");
+                var aScannedCin = (oTableCinFrag && oTableCinFrag.getModel())
+                    ? (oTableCinFrag.getModel().getProperty("/ITEMS") || []) : [];
+                var oScannedCinSet = {};
+                aScannedCin.forEach(function (slot) {
+                    if (slot.value) {
+                        oScannedCinSet[slot.value.toUpperCase().split("!").slice(0, 2).join("!")] = true;
+                    }
+                });
+
+                var aItemsBom = this._aBomComponentesKg
+                    .filter(function (oComp) {
+                        var sMat = (oComp.material && oComp.material.material) || "";
+                        var sLote = oComp.batchNumber || "";
+                        return !oScannedCinSet[(sMat + "!" + sLote).toUpperCase()];
+                    })
+                    .map(function (oComp) {
+                        var sMat = (oComp.material && oComp.material.material) || "";
+                        var sLote = oComp.batchNumber || "";
+                        var nQty = parseFloat(oComp.totalQuantity || 0);
+                        return { MATERIAL: sMat, LOTE: sLote, CANTIDAD: nQty.toFixed(2), CODIGO: sMat + "!" + sLote };
+                    });
+                if (!this.byId(sDialogId)) {
+                    Fragment.load({
+                        id: sFragId,
+                        name: "serviacero.custom.plugins.zpluginPutBatchWCEF02.zpluginPutBatchWCEF02.fragment.batchList",
+                        controller: this
+                    }).then(function (oPopover) {
+                        oView.addDependent(oPopover);
+                        oPopover.setModel(new JSONModel({ ITEMS: aItemsBom }));
+                        oPopover.openBy(oSource);
+                    });
+                } else {
+                    var oDialogBom = this.byId(sDialogId);
+                    oDialogBom.setModel(new JSONModel({ ITEMS: aItemsBom }));
+                    oDialogBom.openBy(oSource);
+                }
+                return;
+            }
+
+            // ALAMBRE (M) o CINTAS sin lotes en BOM: consultar inventario
             var oThis = this;
             if (!this.byId(sDialogId)) {
                 Fragment.load({
@@ -470,6 +528,7 @@ sap.ui.define([
             var oView = this.getView();
             var oSapApi = this.getPublicApiRestDataSourceUri();
             var oBundle = oView.getModel("i18n").getResourceBundle();
+            var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
             var oDialog = this.byId(sDialogId || "batchListDialog");
 
             if (!oDialog) { return; }
@@ -504,6 +563,21 @@ sap.ui.define([
                             CANTIDAD: nCantidad.toFixed(2),
                             CODIGO: sMat + "!" + sLote
                         };
+                    });
+
+                    // Filtrar lotes ya escaneados en la tabla correspondiente
+                    var sTableId = (sDialogId === "Cintas--batchListDialog") ? "idSlotTableCintas" : "idSlotTableAlambre";
+                    var oScannedTable = oView.byId(sTableId);
+                    var aScannedItems = (oScannedTable && oScannedTable.getModel())
+                        ? (oScannedTable.getModel().getProperty("/ITEMS") || []) : [];
+                    var oScannedSet = {};
+                    aScannedItems.forEach(function (slot) {
+                        if (slot.value) {
+                            oScannedSet[slot.value.toUpperCase().split("!").slice(0, 2).join("!")] = true;
+                        }
+                    });
+                    aItems = aItems.filter(function (oItem) {
+                        return !oScannedSet[(oItem.MATERIAL + "!" + oItem.LOTE).toUpperCase()];
                     });
 
                     oDialog.setModel(new JSONModel({ ITEMS: aItems }));
@@ -1191,7 +1265,8 @@ sap.ui.define([
                     return valorItem.split('!').slice(0, 2).join('!') === materialLoteEscaneado;
                 });
                 if (oExiste) {
-                    sap.m.MessageToast.show(oBundle.getText("barcodeExists", [sBarcode, oExiste.attribute]));
+                    var sLoteDisplay = sBarcode.split("!")[1] || sBarcode;
+                    sap.m.MessageToast.show(oBundle.getText("barcodeExists", [sLoteDisplay, oExiste.attribute]));
                     oInput.setValue(""); oInput.focus();
                     return;
                 }
@@ -1906,26 +1981,26 @@ sap.ui.define([
                         aOrdenesAConsultar = aOrdenesAConsultar.concat(aHijas);
                     }
 
-                    // Consultar todas las órdenes y obtener la cantidad máxima de cintas
-                    self._getMaxCintasFromOrders(oPODParams.PLANT_ID, aOrdenesAConsultar, function (iMaxCintas, sRawValue) {
-                        if (iMaxCintas > 0) {
-                            oView.byId("slotQtySuggest").setValue(sRawValue || String(iMaxCintas));
-                            self._suggestedQtyCintas = iMaxCintas;
+                    // Consultar todas las órdenes y obtener la cantidad mínima de cintas
+                    self._getMinCintasFromOrders(oPODParams.PLANT_ID, aOrdenesAConsultar, function (iMinCintas, sRawValue) {
+                        if (iMinCintas > 0) {
+                            oView.byId("slotQtySuggest").setValue(sRawValue || String(iMinCintas));
+                            self._suggestedQtyCintas = iMinCintas;
                             // Inicializar objetivo de la carga actual si no fue confirmado antes
                             var sNoCargaInit = oView.byId("noCarga").getValue() || "1";
                             if (!self._cargaTargets[sNoCargaInit]) {
-                                self._cargaTargets[sNoCargaInit] = iMaxCintas;
+                                self._cargaTargets[sNoCargaInit] = iMinCintas;
                             }
                             // Pre-poblar slotQtyEditable si aún no tiene un valor confirmado
                             var oEditableInput = oView.byId("slotQtyEditable");
                             if (oEditableInput && !oEditableInput.getValue()) {
-                                oEditableInput.setValue(String(self._cargaTargets[sNoCargaInit] || iMaxCintas));
+                                oEditableInput.setValue(String(self._cargaTargets[sNoCargaInit] || iMinCintas));
                             }
                             self._updateProgressIndicator();
                             // Disparar auto-init si NO_CARGA era 0 cuando onGetCustomValues corrió
                             if (self._pendingAutoInit) {
                                 self._pendingAutoInit = false;
-                                self._iniciarNuevaCarga(iMaxCintas);
+                                self._iniciarNuevaCarga(iMinCintas);
                             }
                         } else {
                             oView.byId("slotQtySuggest").setValue("");
@@ -1940,17 +2015,17 @@ sap.ui.define([
         },
 
         /**
-         * Consulta múltiples órdenes y retorna la cantidad máxima de cintas encontrada
+         * Consulta múltiples órdenes y retorna la cantidad mínima de cintas encontrada
          * en CT_100035_500 o CT_100038_500.
          * @param {string} sPlant - Planta
          * @param {string[]} aOrderIds - IDs de órdenes a consultar
-         * @param {function} fCallback - Callback(iMaxCintas, sRawValue)
+         * @param {function} fCallback - Callback(iMinCintas, sRawValue)
          */
-        _getMaxCintasFromOrders: function (sPlant, aOrderIds, fCallback) {
+        _getMinCintasFromOrders: function (sPlant, aOrderIds, fCallback) {
             var self = this;
             var oSapApi = this.getPublicApiRestDataSourceUri();
-            var iMaxCintas = 0;
-            var sMaxRawValue = "";
+            var iMinCintas = 0;
+            var sMinRawValue = "";
             var iRemaining = aOrderIds.length;
             if (!iRemaining) { fCallback(0, ""); return; }
 
@@ -1963,15 +2038,15 @@ sap.ui.define([
                                   aCVs.find(function (cv) { return cv.attribute === "CT_100038_500" && cv.value; });
                         if (oCV && oCV.value) {
                             var iQty = parseInt((oCV.value.trim().split(' ')[0]) || "0", 10) || 0;
-                            if (iQty > 0 && (iMaxCintas === 0 || iQty < iMaxCintas)) {
-                                iMaxCintas = iQty;
-                                sMaxRawValue = oCV.value.trim();
+                            if (iQty > 0 && (iMinCintas === 0 || iQty < iMinCintas)) {
+                                iMinCintas = iQty;
+                                sMinRawValue = oCV.value.trim();
                             }
                         }
-                        if (--iRemaining === 0) { fCallback(iMaxCintas, sMaxRawValue); }
+                        if (--iRemaining === 0) { fCallback(iMinCintas, sMinRawValue); }
                     },
                     function () {
-                        if (--iRemaining === 0) { fCallback(iMaxCintas, sMaxRawValue); }
+                        if (--iRemaining === 0) { fCallback(iMinCintas, sMinRawValue); }
                     }
                 );
             });
@@ -1979,18 +2054,45 @@ sap.ui.define([
 
         /**
          * Resetear el contador de cargas (NO_CARGA = 0) cuando cambia la ORDEN_PADRE.
+         * También limpia los objetivos CARGA_1..CARGA_5, vacía todos los slots escaneados
+         * en el backend y limpia los modelos de ambas tablas en la UI.
+         * Activa _pendingAutoInit para que onGetOrderCustomValues inicie la carga 1 automáticamente.
          */
         _resetLoadCounter: function () {
             var oView = this.getView();
             var oPODParams = this.Commons.getPODParams(this.getOwnerComponent());
             var oSapApi = this.getPublicApiRestDataSourceUri();
             var self = this;
+            var aCargaKeys = ["CARGA_1", "CARGA_2", "CARGA_3", "CARGA_4", "CARGA_5"];
+            // Activar auto-init inmediatamente para que _getMinCintasFromOrders
+            // inicie la carga 1 en cuanto tenga la cantidad de cintas de la nueva orden.
+            this._pendingAutoInit = true;
             var sParams = { plant: oPODParams.PLANT_ID, workCenter: oPODParams.WORK_CENTER };
             this.getWorkCenterCustomValues(sParams, oSapApi).then(function (oRes) {
                 if (!oRes || oRes === "Error" || !oRes.customValues) { return; }
                 var aFinal = oRes.customValues.map(function (cv) {
-                    return cv.attribute === "NO_CARGA" ? { attribute: "NO_CARGA", value: "0" } : cv;
+                    if (cv.attribute === "NO_CARGA") { return { attribute: "NO_CARGA", value: "0" }; }
+                    if (aCargaKeys.indexOf(cv.attribute) !== -1) { return { attribute: cv.attribute, value: "" }; }
+                    // Vaciar todos los slots escaneados
+                    if (/^SLOT\d{3}$/.test(cv.attribute)) { return { attribute: cv.attribute, value: "" }; }
+                    return cv;
                 });
+                // Limpiar objetivos de carga y modelos de tabla en memoria
+                self._cargaTargets = {};
+                var oTableCin = oView.byId("idSlotTableCintas");
+                var oTableAlm = oView.byId("idSlotTableAlambre");
+                if (oTableCin && oTableCin.getModel()) {
+                    var aSlotsCin = oTableCin.getModel().getProperty("/ITEMS") || [];
+                    aSlotsCin.forEach(function (s) { s.value = ""; s.loteQty = ""; s.loteUom = ""; s.cantidadAsignada = ""; });
+                    oTableCin.getModel().refresh(true);
+                }
+                if (oTableAlm && oTableAlm.getModel()) {
+                    var aSlotsAlm = oTableAlm.getModel().getProperty("/ITEMS") || [];
+                    aSlotsAlm.forEach(function (s) { s.value = ""; s.loteQty = ""; s.loteUom = ""; s.cantidadAsignada = ""; });
+                    oTableAlm.getModel().refresh(true);
+                }
+                self._updateProgressIndicator();
+                self._updateOrderSummaryScannedQty([], []);
                 self.setCustomValuesPp({ inCustomValues: aFinal, inPlant: oPODParams.PLANT_ID, inWorkCenter: oPODParams.WORK_CENTER }, oSapApi).then(function () {
                     oView.byId("noCarga").setValue("0");
                 });
