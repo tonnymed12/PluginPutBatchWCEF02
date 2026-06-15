@@ -4,7 +4,7 @@
 
   <Popover
      id="batchListDialog"
-     title="{i18n>fragmentTitle}"
+     title="{i18n>fragmentTitle} ({= ${/ITEMS}.length})"
      placement="Auto"
      contentWidth="700px"
      afterClose=".onAfterClosePopoverInventario">

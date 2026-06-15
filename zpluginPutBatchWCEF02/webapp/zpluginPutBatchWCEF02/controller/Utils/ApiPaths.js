@@ -32,6 +32,7 @@ sap.ui.define([],
 
         //  Gets goods issue summary for consumed quantities by order/SFC
         GOODSISSUES_SUMMARY: "processorder/v2/goodsIssue/summary",
+        GOODSISSUES_SUMMARY_MATERIAL: "inventory/v2/inventory/goodsIssues",
 
 
         /** API CONSUMPTION TYPE : PUT  */
